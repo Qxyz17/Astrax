@@ -47,6 +47,7 @@ Osten 是固定规模的决策引擎；Astrax 负责把它组织成具有身份�
 ```text
 build\Release\astrax.lib
 build\Release\astrax_tests.exe
+build\Release\astrax_train.exe
 build\Release\astrax_demo.exe
 ```
 
@@ -54,13 +55,40 @@ build\Release\astrax_demo.exe
 
 ```powershell
 .\build\Release\astrax_tests.exe
+.\build\Release\astrax_train.exe
 .\build\Release\astrax_demo.exe
 .\build\Release\astrax_demo.exe "write a small hello world program"
 ```
 
 ## 训练
 
-当前 Demo 使用 starter dataset 训练：
+`astrax_train.exe` 会生成并训练一组符合约束的离线轨迹：
+
+```text
+episodes = 128
+horizon = 32
+state_dim = 32
+action_count = 8
+samples = 4096
+```
+
+数据会写入：
+
+```text
+data\astrax_offline_transitions.csv
+artifacts\offline_training_report.txt
+```
+
+每一行都是合法的 `state/action/reward/next_state/terminal` 转移。状态有限且位于 `[-1, 1]`，动作位于 `[0, action_count)`，终止标记只取 `0/1`。训练前会重新从 CSV 加载并执行完整校验。
+数据字段和生成规则见 `data\README.md`。
+
+执行：
+
+```powershell
+.\build\Release\astrax_train.exe
+```
+
+底层训练调用：
 
 ```cpp
 const auto dataset = astrax::make_starter_dataset(
@@ -68,7 +96,7 @@ const auto dataset = astrax::make_starter_dataset(
     model.config().action_count);
 
 const astrax::TrainingReport report =
-    model.train_offline(dataset, 4);
+    model.train_offline(dataset, 24);
 ```
 
 也可以从 CSV 加载离线转移数据：

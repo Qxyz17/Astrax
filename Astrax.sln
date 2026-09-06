@@ -8,6 +8,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AstraxTests", "astrax_tests
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AstraxDemo", "astrax_demo.vcxproj", "{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AstraxTrain", "astrax_train.vcxproj", "{B39C1BB7-7A2D-4C91-9E8E-9E3E1CEEF93A}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "osten", "..\Osten\osten.vcxproj", "{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}"
 EndProject
 Global
@@ -28,6 +30,10 @@ Global
 		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Debug|x64.Build.0 = Debug|x64
 		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Release|x64.ActiveCfg = Release|x64
 		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Release|x64.Build.0 = Release|x64
+		{B39C1BB7-7A2D-4C91-9E8E-9E3E1CEEF93A}.Debug|x64.ActiveCfg = Debug|x64
+		{B39C1BB7-7A2D-4C91-9E8E-9E3E1CEEF93A}.Debug|x64.Build.0 = Debug|x64
+		{B39C1BB7-7A2D-4C91-9E8E-9E3E1CEEF93A}.Release|x64.ActiveCfg = Release|x64
+		{B39C1BB7-7A2D-4C91-9E8E-9E3E1CEEF93A}.Release|x64.Build.0 = Release|x64
 		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Debug|x64.ActiveCfg = Debug|x64
 		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Debug|x64.Build.0 = Debug|x64
 		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Release|x64.ActiveCfg = Release|x64

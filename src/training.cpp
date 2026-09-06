@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -40,9 +41,24 @@ math::Vector parse_vector(const std::string& value, std::size_t expected) {
     math::Vector result;
     result.reserve(expected);
     for (const std::string& field : fields) {
-        result.push_back(std::stof(field));
+        const float item = std::stof(field);
+        if (!std::isfinite(item)) {
+            throw std::runtime_error("offline dataset contains a non-finite vector value");
+        }
+        result.push_back(item);
     }
     return result;
+}
+
+void validate_state(const math::Vector& state, std::size_t state_dim,
+                    const char* name) {
+    math::require_size(state, state_dim, name);
+    for (float item : state) {
+        if (!std::isfinite(item) || item < -1.0F || item > 1.0F) {
+            throw std::invalid_argument(std::string(name) +
+                                        " must contain finite values in [-1, 1]");
+        }
+    }
 }
 
 } // namespace
@@ -183,12 +199,12 @@ TrainingReport OfflineRLTrainer::train(const std::vector<OfflineTransition>& dat
     if (dataset.empty() || epochs == 0) {
         return report;
     }
+    validate_dataset(dataset, config_.state_dim, config_.action_count);
     for (std::size_t epoch = 0; epoch < epochs; ++epoch) {
         float predictor_loss = 0.0F;
         float value_loss = 0.0F;
         float intrinsic = 0.0F;
         for (const OfflineTransition& sample : dataset) {
-            const math::Vector predicted_next = predictor_.predict(sample.state, sample.action);
             predictor_loss += predictor_.train(sample);
             value_loss += values_.train_q_learning(sample, config_.discount,
                                                    sample.next_state);
@@ -199,6 +215,78 @@ TrainingReport OfflineRLTrainer::train(const std::vector<OfflineTransition>& dat
         report.average_intrinsic_reward = intrinsic / static_cast<float>(dataset.size());
     }
     return report;
+}
+
+void OfflineRLTrainer::validate_dataset(const std::vector<OfflineTransition>& dataset,
+                                        std::size_t state_dim,
+                                        std::size_t action_count) {
+    if (state_dim == 0 || action_count == 0) {
+        throw std::invalid_argument("offline dataset dimensions must be positive");
+    }
+    if (dataset.empty()) {
+        throw std::invalid_argument("offline dataset must not be empty");
+    }
+    for (std::size_t index = 0; index < dataset.size(); ++index) {
+        const OfflineTransition& sample = dataset[index];
+        try {
+            validate_state(sample.state, state_dim, "offline state");
+            validate_state(sample.next_state, state_dim, "offline next_state");
+        } catch (const std::exception& error) {
+            throw std::invalid_argument(
+                "invalid offline dataset sample " + std::to_string(index) +
+                ": " + error.what());
+        }
+        if (sample.action >= action_count) {
+            throw std::invalid_argument(
+                "invalid offline dataset sample " + std::to_string(index) +
+                ": action is out of range");
+        }
+        if (!std::isfinite(sample.reward)) {
+            throw std::invalid_argument(
+                "invalid offline dataset sample " + std::to_string(index) +
+                ": reward is not finite");
+        }
+    }
+}
+
+void OfflineRLTrainer::save_csv(const std::string& path,
+                                const std::vector<OfflineTransition>& dataset) {
+    if (dataset.empty()) {
+        throw std::invalid_argument("cannot save an empty offline dataset");
+    }
+    const std::size_t state_dim = dataset.front().state.size();
+    std::size_t action_count = 0;
+    for (const OfflineTransition& sample : dataset) {
+        action_count = std::max(action_count, sample.action + 1);
+    }
+    validate_dataset(dataset, state_dim, action_count);
+
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("cannot create offline dataset: " + path);
+    }
+    output << std::setprecision(9);
+    output << "# Astrax offline transition dataset\n";
+    output << "# state values are finite and bounded to [-1, 1]\n";
+    output << "action,reward,terminal,state,next_state\n";
+    for (const OfflineTransition& sample : dataset) {
+        output << sample.action << ',' << sample.reward << ','
+               << (sample.terminal ? 1 : 0) << ',';
+        for (std::size_t index = 0; index < sample.state.size(); ++index) {
+            if (index != 0) {
+                output << ';';
+            }
+            output << sample.state[index];
+        }
+        output << ',';
+        for (std::size_t index = 0; index < sample.next_state.size(); ++index) {
+            if (index != 0) {
+                output << ';';
+            }
+            output << sample.next_state[index];
+        }
+        output << '\n';
+    }
 }
 
 std::vector<OfflineTransition> OfflineRLTrainer::load_csv(const std::string& path,
@@ -216,20 +304,37 @@ std::vector<OfflineTransition> OfflineRLTrainer::load_csv(const std::string& pat
             continue;
         }
         const std::vector<std::string> fields = split(line, ',');
-        if (fields.size() != 5 || fields[0] == "action") {
-            if (fields.size() == 5 && fields[0] == "action") {
-                continue;
-            }
+        if (fields.size() == 5 && fields[0] == "action") {
+            continue;
+        }
+        if (fields.size() != 5) {
             throw std::runtime_error("invalid offline dataset row " +
                                      std::to_string(line_number));
         }
-        OfflineTransition sample;
-        sample.action = static_cast<std::size_t>(std::stoul(fields[0]));
-        sample.reward = std::stof(fields[1]);
-        sample.terminal = std::stoi(fields[2]) != 0;
-        sample.state = parse_vector(fields[3], state_dim);
-        sample.next_state = parse_vector(fields[4], state_dim);
-        dataset.push_back(std::move(sample));
+        try {
+            OfflineTransition sample;
+            sample.action = static_cast<std::size_t>(std::stoul(fields[0]));
+            sample.reward = std::stof(fields[1]);
+            const int terminal = std::stoi(fields[2]);
+            if (terminal != 0 && terminal != 1) {
+                throw std::runtime_error("terminal must be 0 or 1");
+            }
+            sample.terminal = terminal != 0;
+            sample.state = parse_vector(fields[3], state_dim);
+            sample.next_state = parse_vector(fields[4], state_dim);
+            dataset.push_back(std::move(sample));
+        } catch (const std::exception& error) {
+            throw std::runtime_error("invalid offline dataset row " +
+                                     std::to_string(line_number) + ": " +
+                                     error.what());
+        }
+    }
+    if (!dataset.empty()) {
+        std::size_t action_count = 0;
+        for (const OfflineTransition& sample : dataset) {
+            action_count = std::max(action_count, sample.action + 1);
+        }
+        validate_dataset(dataset, state_dim, action_count);
     }
     return dataset;
 }
@@ -242,27 +347,36 @@ std::vector<OfflineTransition> make_starter_dataset(std::size_t state_dim,
         throw std::invalid_argument("starter dataset dimensions must be positive");
     }
     std::mt19937 rng(91);
-    std::uniform_real_distribution<float> noise(-0.03F, 0.03F);
+    std::uniform_real_distribution<float> noise(-0.01F, 0.01F);
+    std::uniform_real_distribution<float> target_distribution(-0.8F, 0.8F);
     std::vector<OfflineTransition> dataset;
     dataset.reserve(episodes * horizon);
+    math::Vector target(state_dim, 0.0F);
+    for (std::size_t index = 0; index < state_dim; ++index) {
+        target[index] = target_distribution(rng);
+    }
     for (std::size_t episode = 0; episode < episodes; ++episode) {
         math::Vector state(state_dim, 0.0F);
         for (std::size_t step = 0; step < horizon; ++step) {
-            const std::size_t action = (episode + step) % action_count;
+            const std::size_t action =
+                (episode * 5 + step * 3 + (step / 4)) % action_count;
             math::Vector next_state = state;
             const std::size_t coordinate = action % state_dim;
+            const float before_error = std::abs(target[coordinate] - state[coordinate]);
+            const float direction = target[coordinate] >= state[coordinate] ? 1.0F : -1.0F;
             next_state[coordinate] = std::clamp(
-                next_state[coordinate] + 0.08F + noise(rng), -1.0F, 1.0F);
+                state[coordinate] + direction * 0.12F + noise(rng), -1.0F, 1.0F);
             for (std::size_t index = 0; index < state_dim; ++index) {
                 if (index != coordinate) {
                     next_state[index] = std::clamp(
-                        next_state[index] * 0.995F + noise(rng) * 0.2F, -1.0F, 1.0F);
+                        state[index] * 0.998F + noise(rng) * 0.15F, -1.0F, 1.0F);
                 }
             }
+            const float after_error = std::abs(target[coordinate] - next_state[coordinate]);
             OfflineTransition sample;
             sample.state = state;
             sample.action = action;
-            sample.reward = 1.0F - std::abs(0.5F - next_state[coordinate]);
+            sample.reward = std::clamp(before_error - after_error - 0.01F, -1.0F, 1.0F);
             sample.next_state = next_state;
             sample.terminal = step + 1 == horizon;
             dataset.push_back(sample);

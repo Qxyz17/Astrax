@@ -66,6 +66,11 @@ public:
 
     TrainingReport train(const std::vector<OfflineTransition>& dataset,
                          std::size_t epochs);
+    static void validate_dataset(const std::vector<OfflineTransition>& dataset,
+                                 std::size_t state_dim,
+                                 std::size_t action_count);
+    static void save_csv(const std::string& path,
+                         const std::vector<OfflineTransition>& dataset);
     static std::vector<OfflineTransition> load_csv(const std::string& path,
                                                    std::size_t state_dim);
 

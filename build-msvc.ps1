@@ -19,4 +19,9 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
+& ".\build\$Configuration\astrax_train.exe"
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 & ".\build\$Configuration\astrax_demo.exe"
