@@ -33,21 +33,23 @@ std::string modality_name(Modality modality) {
     return "unknown";
 }
 
+osten::Config make_osten_config(const ModelConfig& config) {
+    osten::Config result;
+    result.state_dim = config.state_dim;
+    result.goal_dim = config.goal_dim;
+    result.memory_dim = config.state_dim;
+    result.action_count = config.action_count;
+    result.seed = config.seed;
+    return result;
+}
+
 } // namespace
 
 AstraxModel::AstraxModel(ModelConfig config)
     : config_(std::move(config)),
       state_{config_.version, 0, 0.0, 0, {}, {}},
       memory_(config_.memory_vector_dim, config_.memory_capacity),
-      engine_([&config_] {
-          osten::Config result;
-          result.state_dim = config.state_dim;
-          result.goal_dim = config.goal_dim;
-          result.memory_dim = config.state_dim;
-          result.action_count = config.action_count;
-          result.seed = config.seed;
-          return result;
-      }()),
+      engine_(make_osten_config(config_)),
       predictor_(config_.state_dim, config_.action_count, config_.learning_rate),
       values_(config_.state_dim, config_.action_count, config_.learning_rate),
       intrinsic_(config_.intrinsic_reward_scale),
