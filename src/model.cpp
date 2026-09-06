@@ -4,9 +4,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 
+#include "astrax/architecture.hpp"
 #include "astrax/math.hpp"
 
 namespace astrax {
@@ -62,7 +64,8 @@ AstraxModel::AstraxModel(ModelConfig config)
       predictor_(config_.state_dim, config_.action_count, config_.learning_rate),
       values_(config_.state_dim, config_.action_count, config_.learning_rate),
       intrinsic_(config_.intrinsic_reward_scale),
-      trainer_(config_, predictor_, values_, intrinsic_) {}
+      trainer_(config_, predictor_, values_, intrinsic_),
+      dialogue_() {}
 
 void AstraxModel::set_goal(Goal goal) {
     goal.priority = std::clamp(goal.priority, 0.0F, 1.0F);
@@ -161,6 +164,11 @@ ModelOutput AstraxModel::step(const MultimodalInput& input, OutputMode mode) {
         output.text = renderer_.render_code(input.text, output, state_);
     } else if (mode == OutputMode::State) {
         output.text = renderer_.render_state(state_);
+    } else if (dialogue_.trained()) {
+        output.text = dialogue_.respond(input.text, &output.confidence);
+        if (output.text.empty()) {
+            output.text = renderer_.render_text(input.text, output, state_);
+        }
     } else {
         output.text = renderer_.render_text(input.text, output, state_);
     }
@@ -215,6 +223,81 @@ TrainingReport AstraxModel::train_offline_csv(const std::string& path,
                                               std::size_t epochs) {
     return train_offline(
         OfflineRLTrainer::load_csv(path, config_.state_dim), epochs);
+}
+
+DialogueTrainingReport AstraxModel::train_dialogue(
+    const std::vector<DialogueExample>& dataset, std::size_t epochs) {
+    return dialogue_.train(dataset, epochs);
+}
+
+DialogueTrainingReport AstraxModel::train_dialogue_tsv(const std::string& path,
+                                                       std::size_t epochs) {
+    return train_dialogue(
+        HolisticDialogueModel::load_tsv(path, dialogue_.max_response_bytes()),
+        epochs);
+}
+
+std::string AstraxModel::chat(const std::string& input) {
+    MultimodalInput message;
+    message.modality = Modality::Text;
+    message.text = input;
+    return step(message, OutputMode::Text).text;
+}
+
+void AstraxModel::save_checkpoint(const std::string& path) const {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("cannot create Astrax checkpoint: " + path);
+    }
+    constexpr char magic[] = "ASTRAX-TRAINING-CHECKPOINT";
+    constexpr std::uint32_t format_version = 2;
+    output.write(magic, sizeof(magic));
+    output.write(reinterpret_cast<const char*>(&format_version),
+                 sizeof(format_version));
+    const std::uint64_t state_dim = config_.state_dim;
+    const std::uint64_t action_count = config_.action_count;
+    output.write(reinterpret_cast<const char*>(&state_dim), sizeof(state_dim));
+    output.write(reinterpret_cast<const char*>(&action_count), sizeof(action_count));
+    predictor_.save(output);
+    values_.save(output);
+    intrinsic_.save(output);
+    dialogue_.save(output);
+    if (!output) {
+        throw std::runtime_error("failed to write Astrax checkpoint: " + path);
+    }
+}
+
+void AstraxModel::load_checkpoint(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("cannot open Astrax checkpoint: " + path);
+    }
+    constexpr char expected_magic[] = "ASTRAX-TRAINING-CHECKPOINT";
+    char magic[sizeof(expected_magic)]{};
+    std::uint32_t format_version = 0;
+    std::uint64_t state_dim = 0;
+    std::uint64_t action_count = 0;
+    input.read(magic, sizeof(magic));
+    input.read(reinterpret_cast<char*>(&format_version), sizeof(format_version));
+    input.read(reinterpret_cast<char*>(&state_dim), sizeof(state_dim));
+    input.read(reinterpret_cast<char*>(&action_count), sizeof(action_count));
+    if (!input ||
+        std::string(magic, sizeof(magic)) !=
+            std::string(expected_magic, sizeof(expected_magic)) ||
+        (format_version != 1 && format_version != 2) ||
+        state_dim != config_.state_dim ||
+        action_count != config_.action_count) {
+        throw std::runtime_error("Astrax checkpoint header does not match model");
+    }
+    predictor_.load(input);
+    values_.load(input);
+    intrinsic_.load(input);
+    if (format_version >= 2) {
+        dialogue_.load(input);
+    }
+    if (!input) {
+        throw std::runtime_error("Astrax checkpoint is incomplete: " + path);
+    }
 }
 
 } // namespace astrax

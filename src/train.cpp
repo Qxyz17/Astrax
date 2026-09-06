@@ -50,6 +50,27 @@ int main() {
         const astrax::TrainingReport report =
             model.train_offline(loaded, epochs);
 
+        const std::filesystem::path checkpoint_path =
+            artifact_directory / "astrax_training.astrax-model";
+        const astrax::math::Vector validation_state = loaded.front().state;
+        const std::size_t validation_action = loaded.front().action;
+        const astrax::math::Vector expected_prediction =
+            model.predictor().predict(validation_state, validation_action);
+        const float expected_value =
+            model.values().value(validation_state, validation_action);
+        model.save_checkpoint(checkpoint_path.string());
+
+        astrax::AstraxModel restored_model(config);
+        restored_model.load_checkpoint(checkpoint_path.string());
+        const astrax::math::Vector restored_prediction =
+            restored_model.predictor().predict(validation_state, validation_action);
+        const float restored_value =
+            restored_model.values().value(validation_state, validation_action);
+        if (expected_prediction != restored_prediction ||
+            expected_value != restored_value) {
+            throw std::runtime_error("checkpoint reload verification failed");
+        }
+
         const std::filesystem::path report_path =
             artifact_directory / "offline_training_report.txt";
         std::ofstream report_file(report_path, std::ios::trunc);
@@ -60,7 +81,9 @@ int main() {
                     << "predictor_loss=" << report.predictor_loss << '\n'
                     << "value_loss=" << report.value_loss << '\n'
                     << "average_intrinsic_reward="
-                    << report.average_intrinsic_reward << '\n';
+                    << report.average_intrinsic_reward << '\n'
+                    << "checkpoint=" << checkpoint_path.string() << '\n'
+                    << "checkpoint_verified=1\n";
 
         std::cout << "offline training completed\n"
                   << "dataset=" << dataset_path.string() << '\n'
@@ -72,6 +95,8 @@ int main() {
                   << "value_loss=" << report.value_loss << '\n'
                   << "average_intrinsic_reward="
                   << report.average_intrinsic_reward << '\n'
+                  << "checkpoint=" << checkpoint_path.string() << '\n'
+                  << "checkpoint_verified=1\n"
                   << "report=" << report_path.string() << '\n';
         return 0;
     } catch (const std::exception& error) {

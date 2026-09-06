@@ -77,6 +77,7 @@ samples = 4096
 ```text
 data\astrax_offline_transitions.csv
 artifacts\offline_training_report.txt
+artifacts\astrax_training.astrax-model
 ```
 
 每一行都是合法的 `state/action/reward/next_state/terminal` 转移。状态有限且位于 `[-1, 1]`，动作位于 `[0, action_count)`，终止标记只取 `0/1`。训练前会重新从 CSV 加载并执行完整校验。
@@ -112,7 +113,9 @@ model.train_offline_csv("dataset.csv", 10);
 
 CSV 每行包含 `action,reward,terminal,state,next_state`；`state` 和 `next_state` 必须包含 `ModelConfig::state_dim` 个以分号分隔的浮点数。
 
-注意：训练参数目前只存在于进程内，尚未保存为 checkpoint。starter dataset 只是验证训练闭环的数据，不代表真实语言或代码能力。要训练出有用的输出，需要准备真实的状态-动作-奖励-下一状态轨迹，并继续实现 checkpoint、评测和结构化输出解码。
+训练结束后会保存 `artifacts\astrax_training.astrax-model`，然后创建一个全新的 `AstraxModel` 重新加载，并逐值验证状态预测和动作价值输出。checkpoint 当前保存 Astrax 的状态预测器、动作价值模型和内在奖励统计，不修改 Osten 核心拓扑。
+
+starter dataset 只是验证训练闭环的数据，不代表真实语言或代码能力。要训练出有用的输出，需要继续准备真实的状态-动作-奖励-下一状态轨迹，并实现文本/代码结构化解码和完整评测。
 
 ## 架构
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,8 @@ public:
 
     math::Vector predict(const math::Vector& state, std::size_t action) const;
     float train(const OfflineTransition& sample);
+    void save(std::ostream& output) const;
+    void load(std::istream& input);
     std::size_t input_dim() const noexcept { return state_dim_ + action_count_; }
 
 private:
@@ -34,6 +37,8 @@ public:
                            float discount,
                            const math::Vector& next_state);
     float train_supervised(const OfflineTransition& sample, float target);
+    void save(std::ostream& output) const;
+    void load(std::istream& input);
 
 private:
     std::size_t state_dim_;
@@ -49,6 +54,8 @@ public:
 
     float observe(const math::Vector& state);
     void clear() noexcept;
+    void save(std::ostream& output) const;
+    void load(std::istream& input);
     std::size_t observations() const noexcept { return observations_; }
 
 private:

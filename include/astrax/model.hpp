@@ -3,6 +3,7 @@
 #include <string>
 
 #include "osten/engine.hpp"
+#include "astrax/dialogue.hpp"
 #include "astrax/memory.hpp"
 #include "astrax/renderer.hpp"
 #include "astrax/training.hpp"
@@ -26,11 +27,19 @@ public:
     TrainingReport train_offline(const std::vector<OfflineTransition>& dataset,
                                  std::size_t epochs);
     TrainingReport train_offline_csv(const std::string& path, std::size_t epochs);
+    DialogueTrainingReport train_dialogue(
+        const std::vector<DialogueExample>& dataset, std::size_t epochs);
+    DialogueTrainingReport train_dialogue_tsv(const std::string& path,
+                                              std::size_t epochs);
+    std::string chat(const std::string& input);
+    void save_checkpoint(const std::string& path) const;
+    void load_checkpoint(const std::string& path);
 
     const AstraxState& state() const noexcept { return state_; }
     const ModelConfig& config() const noexcept { return config_; }
     const StatePredictor& predictor() const noexcept { return predictor_; }
     const ActionValueModel& values() const noexcept { return values_; }
+    const HolisticDialogueModel& dialogue() const noexcept { return dialogue_; }
 
 private:
     math::Vector embed(const MultimodalInput& input) const;
@@ -44,6 +53,7 @@ private:
     ActionValueModel values_;
     IntrinsicRewardModel intrinsic_;
     OfflineRLTrainer trainer_;
+    HolisticDialogueModel dialogue_;
     ControlledRenderer renderer_;
 };
 

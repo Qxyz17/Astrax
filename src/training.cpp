@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <istream>
+#include <ostream>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -61,6 +64,67 @@ void validate_state(const math::Vector& state, std::size_t state_dim,
     }
 }
 
+void write_size(std::ostream& output, std::size_t value) {
+    const std::uint64_t stored = static_cast<std::uint64_t>(value);
+    output.write(reinterpret_cast<const char*>(&stored), sizeof(stored));
+}
+
+std::size_t read_size(std::istream& input) {
+    std::uint64_t stored = 0;
+    input.read(reinterpret_cast<char*>(&stored), sizeof(stored));
+    if (!input) {
+        throw std::runtime_error("checkpoint ended while reading a size");
+    }
+    return static_cast<std::size_t>(stored);
+}
+
+void write_vector(std::ostream& output, const math::Vector& value) {
+    write_size(output, value.size());
+    output.write(reinterpret_cast<const char*>(value.data()),
+                 static_cast<std::streamsize>(value.size() * sizeof(float)));
+    if (!output) {
+        throw std::runtime_error("failed to write checkpoint vector");
+    }
+}
+
+math::Vector read_vector(std::istream& input, std::size_t expected_size) {
+    const std::size_t stored_size = read_size(input);
+    if (stored_size != expected_size) {
+        throw std::runtime_error("checkpoint vector dimension does not match model");
+    }
+    math::Vector result(stored_size, 0.0F);
+    input.read(reinterpret_cast<char*>(result.data()),
+               static_cast<std::streamsize>(result.size() * sizeof(float)));
+    if (!input) {
+        throw std::runtime_error("checkpoint ended while reading a vector");
+    }
+    for (float item : result) {
+        if (!std::isfinite(item)) {
+            throw std::runtime_error("checkpoint contains a non-finite weight");
+        }
+    }
+    return result;
+}
+
+math::Vector read_vector(std::istream& input) {
+    const std::size_t stored_size = read_size(input);
+    if (stored_size > 100000000ULL) {
+        throw std::runtime_error("checkpoint vector is unreasonably large");
+    }
+    math::Vector result(stored_size, 0.0F);
+    input.read(reinterpret_cast<char*>(result.data()),
+               static_cast<std::streamsize>(result.size() * sizeof(float)));
+    if (!input) {
+        throw std::runtime_error("checkpoint ended while reading a vector");
+    }
+    for (float item : result) {
+        if (!std::isfinite(item)) {
+            throw std::runtime_error("checkpoint contains a non-finite value");
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 StatePredictor::StatePredictor(std::size_t state_dim,
@@ -104,6 +168,21 @@ float StatePredictor::train(const OfflineTransition& sample) {
         bias_[row] += learning_rate_ * error;
     }
     return loss / static_cast<float>(state_dim_);
+}
+
+void StatePredictor::save(std::ostream& output) const {
+    write_size(output, state_dim_);
+    write_size(output, action_count_);
+    write_vector(output, weights_);
+    write_vector(output, bias_);
+}
+
+void StatePredictor::load(std::istream& input) {
+    if (read_size(input) != state_dim_ || read_size(input) != action_count_) {
+        throw std::runtime_error("checkpoint predictor dimensions do not match model");
+    }
+    weights_ = read_vector(input, weights_.size());
+    bias_ = read_vector(input, bias_.size());
 }
 
 ActionValueModel::ActionValueModel(std::size_t state_dim,
@@ -162,6 +241,21 @@ float ActionValueModel::train_supervised(const OfflineTransition& sample, float 
     return error * error;
 }
 
+void ActionValueModel::save(std::ostream& output) const {
+    write_size(output, state_dim_);
+    write_size(output, action_count_);
+    write_vector(output, weights_);
+    write_vector(output, bias_);
+}
+
+void ActionValueModel::load(std::istream& input) {
+    if (read_size(input) != state_dim_ || read_size(input) != action_count_) {
+        throw std::runtime_error("checkpoint value dimensions do not match model");
+    }
+    weights_ = read_vector(input, weights_.size());
+    bias_ = read_vector(input, bias_.size());
+}
+
 IntrinsicRewardModel::IntrinsicRewardModel(float scale) : scale_(scale) {}
 
 float IntrinsicRewardModel::observe(const math::Vector& state) {
@@ -185,6 +279,31 @@ void IntrinsicRewardModel::clear() noexcept {
     centroid_.clear();
 }
 
+void IntrinsicRewardModel::save(std::ostream& output) const {
+    output.write(reinterpret_cast<const char*>(&scale_), sizeof(scale_));
+    write_size(output, observations_);
+    write_vector(output, centroid_);
+    if (!output) {
+        throw std::runtime_error("failed to write intrinsic reward checkpoint");
+    }
+}
+
+void IntrinsicRewardModel::load(std::istream& input) {
+    float stored_scale = 0.0F;
+    input.read(reinterpret_cast<char*>(&stored_scale), sizeof(stored_scale));
+    if (!input || !std::isfinite(stored_scale) ||
+        std::abs(stored_scale - scale_) > 1.0e-6F) {
+        throw std::runtime_error("checkpoint intrinsic reward configuration mismatch");
+    }
+    const std::size_t stored_observations = read_size(input);
+    math::Vector stored_centroid = read_vector(input);
+    if ((stored_observations == 0 && !stored_centroid.empty()) ||
+        (stored_observations != 0 && stored_centroid.empty())) {
+        throw std::runtime_error("checkpoint intrinsic reward state is inconsistent");
+    }
+    centroid_ = std::move(stored_centroid);
+    observations_ = stored_observations;
+}
 OfflineRLTrainer::OfflineRLTrainer(const ModelConfig& config,
                                    StatePredictor& predictor,
                                    ActionValueModel& values,

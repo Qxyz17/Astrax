@@ -36,6 +36,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\astrax\math.hpp" />
+    <ClInclude Include="include\astrax\architecture.hpp" />
+    <ClInclude Include="include\astrax\dialogue.hpp" />
     <ClInclude Include="include\astrax\memory.hpp" />
     <ClInclude Include="include\astrax\model.hpp" />
     <ClInclude Include="include\astrax\renderer.hpp" />
@@ -44,6 +46,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\memory.cpp" />
+    <ClCompile Include="src\dialogue.cpp" />
     <ClCompile Include="src\model.cpp" />
     <ClCompile Include="src\renderer.cpp" />
     <ClCompile Include="src\training.cpp" />

@@ -1,4 +1,5 @@
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
@@ -54,12 +55,36 @@ void test_training_changes_predictor() {
     require(before != after, "predictor must learn from data");
 }
 
+void test_checkpoint_round_trip() {
+    astrax::ModelConfig config;
+    config.state_dim = 4;
+    config.action_count = 2;
+    astrax::AstraxModel trained(config);
+    const auto dataset = astrax::make_starter_dataset(4, 2, 2, 5);
+    trained.train_offline(dataset, 3);
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "astrax-test-checkpoint.astrax-model";
+    trained.save_checkpoint(path.string());
+    astrax::AstraxModel restored(config);
+    restored.load_checkpoint(path.string());
+    std::filesystem::remove(path);
+
+    require(trained.predictor().predict(dataset[0].state, dataset[0].action) ==
+                restored.predictor().predict(dataset[0].state, dataset[0].action),
+            "checkpoint predictor round trip");
+    require(trained.values().value(dataset[0].state, dataset[0].action) ==
+                restored.values().value(dataset[0].state, dataset[0].action),
+            "checkpoint value round trip");
+}
+
 } // namespace
 
 int main() {
     try {
         test_memory_and_introspection();
         test_training_changes_predictor();
+        test_checkpoint_round_trip();
         std::cout << "all Astrax tests passed\n";
         return 0;
     } catch (const std::exception& error) {
