@@ -24,9 +24,32 @@ std::filesystem::path project_root() {
     return root;
 }
 
+std::string utf8_from_wide(const std::wstring& value) {
+#ifdef _WIN32
+    if (value.empty()) {
+        return {};
+    }
+    const int size = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        throw std::runtime_error("cannot convert Windows text to UTF-8");
+    }
+    std::string result(static_cast<std::size_t>(size), '\0');
+    if (WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+            static_cast<int>(value.size()), result.data(), size, nullptr, nullptr) <= 0) {
+        throw std::runtime_error("cannot convert Windows text to UTF-8");
+    }
+    return result;
+#else
+    return std::string(value.begin(), value.end());
+#endif
+}
+
 } // namespace
 
-int main(int argc, char** argv) {
+int wmain(int argc, wchar_t** argv) {
 #ifdef _WIN32
     SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
@@ -47,22 +70,24 @@ int main(int argc, char** argv) {
             {"conversation", "Understand the complete message and answer it", 0.9F, true});
 
         if (argc > 1) {
-            std::string message = argv[1];
+            std::string message = utf8_from_wide(argv[1]);
             for (int index = 2; index < argc; ++index) {
                 message += " ";
-                message += argv[index];
+                message += utf8_from_wide(argv[index]);
             }
             std::cout << model.chat(message) << '\n';
             return 0;
         }
 
         std::cout << "Astrax dialogue ready. 输入 /exit 结束。\n";
-        std::string message;
+        std::wstring wide_message;
         while (true) {
             std::cout << "你> " << std::flush;
-            if (!std::getline(std::cin, message) || message == "/exit") {
+            if (!std::getline(std::wcin, wide_message) ||
+                wide_message == L"/exit") {
                 break;
             }
+            const std::string message = utf8_from_wide(wide_message);
             if (message.empty()) {
                 continue;
             }

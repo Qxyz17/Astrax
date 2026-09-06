@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "astrax/model.hpp"
+#include "astrax/architecture.hpp"
 #include "astrax/training.hpp"
 
 namespace {
@@ -78,13 +79,43 @@ void test_checkpoint_round_trip() {
             "checkpoint value round trip");
 }
 
+void test_architecture_contract() {
+    static_assert(!astrax::architecture::kUsesTransformer);
+    static_assert(!astrax::architecture::kUsesNextTokenPrediction);
+    static_assert(!astrax::architecture::kUsesAutoregressiveGeneration);
+    static_assert(astrax::architecture::kOstenIsCoreDecisionEngine);
+    static_assert(astrax::architecture::kUsesParallelResponseSlots);
+    require(!astrax::architecture::kFinalDecisionUsesKeywordRules,
+            "keyword rules must not select final answers");
+    require(!astrax::architecture::kFinalDecisionUsesDirectRetrieval,
+            "retrieval must not select final answers");
+}
+
+void test_holistic_dialogue() {
+    astrax::HolisticDialogueModel dialogue(256, 128, 0.12F);
+    const std::vector<astrax::DialogueExample> dataset = {
+        {"alpha question", "alpha response"},
+        {"beta question", "beta response"},
+        {"gamma question", "gamma response"}
+    };
+    const auto report = dialogue.train(dataset, 80);
+    require(report.examples == dataset.size(), "dialogue sample count");
+    require(dialogue.trained(), "dialogue must be marked trained");
+    require(dialogue.respond("alpha question") == "alpha response",
+            "dialogue must decode learned complete response");
+    require(dialogue.respond("beta question") == "beta response",
+            "dialogue must separate complete inputs");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_architecture_contract();
         test_memory_and_introspection();
         test_training_changes_predictor();
         test_checkpoint_round_trip();
+        test_holistic_dialogue();
         std::cout << "all Astrax tests passed\n";
         return 0;
     } catch (const std::exception& error) {
