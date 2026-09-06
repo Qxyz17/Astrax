@@ -32,7 +32,7 @@ std::string ControlledRenderer::render_code(const std::string& request,
            << "    constexpr unsigned long long iteration = " << state.iteration << "ULL;\n"
            << "    constexpr unsigned action = " << output.action_id << "U;\n"
            << "    std::cout << \"Astrax action \" << action\n"
-           << "              << \" at iteration \" << iteration << '\\\\n';\n"
+           << "              << \" at iteration \" << iteration << '\\n';\n"
            << "    return 0;\n"
            << "}\n";
     return result.str();
@@ -49,4 +49,3 @@ std::string ControlledRenderer::render_state(const AstraxState& state) const {
 }
 
 } // namespace astrax
-

@@ -190,7 +190,8 @@ TrainingReport OfflineRLTrainer::train(const std::vector<OfflineTransition>& dat
         for (const OfflineTransition& sample : dataset) {
             const math::Vector predicted_next = predictor_.predict(sample.state, sample.action);
             predictor_loss += predictor_.train(sample);
-            value_loss += values_.train_q_learning(sample, config_.discount, predicted_next);
+            value_loss += values_.train_q_learning(sample, config_.discount,
+                                                   sample.next_state);
             intrinsic += intrinsic_.observe(sample.next_state);
         }
         report.predictor_loss = predictor_loss / static_cast<float>(dataset.size());

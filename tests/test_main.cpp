@@ -26,6 +26,14 @@ void test_memory_and_introspection() {
     require(!output.text.empty(), "text output");
     require(model.state().iteration == 1, "iteration state");
     require(model.introspect("iteration") == "1", "structured introspection");
+    require(model.introspect("How many memories do you have?") == "3",
+            "memory count introspection");
+    require(model.introspect("What do you remember?").find("first memory") !=
+                std::string::npos,
+            "memory content introspection");
+    require(model.introspect("我记住了什么？").find("first memory") !=
+                std::string::npos,
+            "Chinese memory content introspection");
 }
 
 void test_training_changes_predictor() {

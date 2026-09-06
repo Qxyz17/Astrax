@@ -21,6 +21,15 @@ std::uint64_t hash_bytes(const std::string& value) {
     return hash;
 }
 
+std::string ascii_lower(std::string value) {
+    for (char& character : value) {
+        if (character >= 'A' && character <= 'Z') {
+            character = static_cast<char>(character - 'A' + 'a');
+        }
+    }
+    return value;
+}
+
 std::string modality_name(Modality modality) {
     switch (modality) {
     case Modality::Text: return "text";
@@ -160,24 +169,38 @@ ModelOutput AstraxModel::step(const MultimodalInput& input, OutputMode mode) {
 }
 
 std::string AstraxModel::introspect(const std::string& question) const {
+    const std::string normalized_question = ascii_lower(question);
     if (question.find("迭代") != std::string::npos ||
-        question.find("iteration") != std::string::npos) {
+        normalized_question.find("iteration") != std::string::npos) {
         return std::to_string(state_.iteration);
     }
     if (question.find("目标") != std::string::npos ||
-        question.find("goal") != std::string::npos) {
+        normalized_question.find("goal") != std::string::npos) {
         return state_.current_goal.description;
     }
     if (question.find("记住") != std::string::npos ||
-        question.find("memory") != std::string::npos) {
+        normalized_question.find("memory") != std::string::npos ||
+        normalized_question.find("memories") != std::string::npos ||
+        normalized_question.find("remember") != std::string::npos) {
+        if (question.find("什么") != std::string::npos ||
+            normalized_question.find("what") != std::string::npos) {
+            std::ostringstream remembered;
+            for (const MemoryRecord& record : memory_.records()) {
+                if (remembered.tellp() > 0) {
+                    remembered << '\n';
+                }
+                remembered << record.content;
+            }
+            return remembered.str();
+        }
         return std::to_string(memory_.size());
     }
     if (question.find("运行") != std::string::npos ||
-        question.find("uptime") != std::string::npos) {
+        normalized_question.find("uptime") != std::string::npos) {
         return std::to_string(state_.uptime_seconds);
     }
     if (question.find("版本") != std::string::npos ||
-        question.find("version") != std::string::npos) {
+        normalized_question.find("version") != std::string::npos) {
         return state_.version;
     }
     return "No structured introspection field matched.";
