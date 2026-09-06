@@ -65,7 +65,7 @@ AstraxModel::AstraxModel(ModelConfig config)
       values_(config_.state_dim, config_.action_count, config_.learning_rate),
       intrinsic_(config_.intrinsic_reward_scale),
       trainer_(config_, predictor_, values_, intrinsic_),
-      dialogue_() {}
+      dialogue_(512, 256, config_.learning_rate) {}
 
 void AstraxModel::set_goal(Goal goal) {
     goal.priority = std::clamp(goal.priority, 0.0F, 1.0F);

@@ -29,6 +29,7 @@ int main() {
         const std::size_t episodes = 128;
         const std::size_t horizon = 32;
         const std::size_t epochs = 24;
+        const std::size_t dialogue_epochs = 160;
 
         const std::filesystem::path root = project_root();
         const std::filesystem::path data_directory = root / "data";
@@ -49,6 +50,14 @@ int main() {
         astrax::AstraxModel model(config);
         const astrax::TrainingReport report =
             model.train_offline(loaded, epochs);
+        const std::filesystem::path dialogue_dataset_path =
+            data_directory / "astrax_dialogue_pairs.tsv";
+        const std::vector<astrax::DialogueExample> dialogue_dataset =
+            astrax::HolisticDialogueModel::load_tsv(
+                dialogue_dataset_path.string(),
+                model.dialogue().max_response_bytes());
+        const astrax::DialogueTrainingReport dialogue_report =
+            model.train_dialogue(dialogue_dataset, dialogue_epochs);
 
         const std::filesystem::path checkpoint_path =
             artifact_directory / "astrax_training.astrax-model";
@@ -58,6 +67,8 @@ int main() {
             model.predictor().predict(validation_state, validation_action);
         const float expected_value =
             model.values().value(validation_state, validation_action);
+        const std::string expected_dialogue =
+            model.dialogue().respond(dialogue_dataset.front().input);
         model.save_checkpoint(checkpoint_path.string());
 
         astrax::AstraxModel restored_model(config);
@@ -66,8 +77,12 @@ int main() {
             restored_model.predictor().predict(validation_state, validation_action);
         const float restored_value =
             restored_model.values().value(validation_state, validation_action);
+        const std::string restored_dialogue =
+            restored_model.dialogue().respond(dialogue_dataset.front().input);
         if (expected_prediction != restored_prediction ||
-            expected_value != restored_value) {
+            expected_value != restored_value ||
+            expected_dialogue != restored_dialogue ||
+            !restored_model.dialogue().trained()) {
             throw std::runtime_error("checkpoint reload verification failed");
         }
 
@@ -82,6 +97,15 @@ int main() {
                     << "value_loss=" << report.value_loss << '\n'
                     << "average_intrinsic_reward="
                     << report.average_intrinsic_reward << '\n'
+                    << "dialogue_dataset=" << dialogue_dataset_path.string() << '\n'
+                    << "dialogue_examples=" << dialogue_report.examples << '\n'
+                    << "dialogue_epochs=" << dialogue_report.epochs << '\n'
+                    << "dialogue_cross_entropy="
+                    << dialogue_report.cross_entropy << '\n'
+                    << "dialogue_byte_accuracy="
+                    << dialogue_report.byte_accuracy << '\n'
+                    << "dialogue_exact_match="
+                    << dialogue_report.exact_match << '\n'
                     << "checkpoint=" << checkpoint_path.string() << '\n'
                     << "checkpoint_verified=1\n";
 
@@ -95,6 +119,14 @@ int main() {
                   << "value_loss=" << report.value_loss << '\n'
                   << "average_intrinsic_reward="
                   << report.average_intrinsic_reward << '\n'
+                  << "dialogue_examples=" << dialogue_report.examples << '\n'
+                  << "dialogue_epochs=" << dialogue_report.epochs << '\n'
+                  << "dialogue_cross_entropy="
+                  << dialogue_report.cross_entropy << '\n'
+                  << "dialogue_byte_accuracy="
+                  << dialogue_report.byte_accuracy << '\n'
+                  << "dialogue_exact_match="
+                  << dialogue_report.exact_match << '\n'
                   << "checkpoint=" << checkpoint_path.string() << '\n'
                   << "checkpoint_verified=1\n"
                   << "report=" << report_path.string() << '\n';

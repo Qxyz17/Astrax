@@ -64,11 +64,11 @@ math::Vector encode_text(const std::string& input, std::size_t dimension) {
     // n-grams preserve useful generalization for unseen utterances. This is
     // learned association, not a retrieval table or a keyword branch.
     const std::uint64_t whole = fnv1a(input);
-    for (std::size_t offset = 0; offset < 4; ++offset) {
+    for (std::size_t offset = 0; offset < 32; ++offset) {
         const std::uint64_t hash = mix_hash(whole + offset * 0x9e3779b97f4a7c15ULL);
         result[static_cast<std::size_t>(hash % dimension)] +=
-            (hash & 1ULL) != 0ULL ? 2.0F : -2.0F;
-        count += 2;
+            (hash & 1ULL) != 0ULL ? 3.0F : -3.0F;
+        count += 3;
     }
 
     const float scale = 1.0F / std::sqrt(static_cast<float>(std::max<std::size_t>(1, count)));
@@ -178,59 +178,57 @@ DialogueTrainingReport HolisticDialogueModel::train(
         for (const DialogueExample& example : dataset) {
             const math::Vector features = encode_input(example.input);
             bool example_exact = true;
-            for (std::size_t slot = 0; slot < max_response_bytes_; ++slot) {
+            const std::size_t training_slots =
+                std::min(max_response_bytes_, example.response.size() + 1);
+            for (std::size_t slot = 0; slot < training_slots; ++slot) {
                 const std::size_t target =
                     slot < example.response.size()
                         ? static_cast<unsigned char>(example.response[slot])
                         : 0;
-                const std::size_t base = (slot * kByteClasses) * input_dim_;
                 std::array<float, kByteClasses> logits{};
-                float maximum = -std::numeric_limits<float>::infinity();
                 for (std::size_t byte = 0; byte < kByteClasses; ++byte) {
                     float value = bias_[slot * kByteClasses + byte];
                     for (std::size_t feature = 0; feature < input_dim_; ++feature) {
-                        value += weights_[base + byte * input_dim_ + feature] *
+                        value += weights_[weight_index(slot, byte, feature)] *
                                  features[feature];
                     }
                     logits[byte] = value;
-                    maximum = std::max(maximum, value);
                 }
-                std::array<float, kByteClasses> probabilities{};
-                float denominator = 0.0F;
-                for (std::size_t byte = 0; byte < kByteClasses; ++byte) {
-                    probabilities[byte] = std::exp(logits[byte] - maximum);
-                    denominator += probabilities[byte];
-                }
-                for (float& probability : probabilities) {
-                    probability /= denominator;
-                }
-                loss -= std::log(std::max(probabilities[target], 1.0e-12F));
                 const std::size_t predicted = static_cast<std::size_t>(
-                    std::distance(probabilities.begin(),
-                                  std::max_element(probabilities.begin(),
-                                                   probabilities.end())));
+                    std::distance(logits.begin(),
+                                  std::max_element(logits.begin(), logits.end())));
                 if (predicted == target) {
                     ++correct;
                 } else {
                     example_exact = false;
-                }
-                ++total;
-                for (std::size_t byte = 0; byte < kByteClasses; ++byte) {
-                    const float gradient =
-                        static_cast<float>(byte == target ? 1.0F : 0.0F) -
-                        probabilities[byte];
-                    bias_[slot * kByteClasses + byte] += learning_rate_ * gradient;
-                    for (std::size_t feature = 0; feature < input_dim_; ++feature) {
-                        weights_[weight_index(slot, byte, feature)] +=
-                            learning_rate_ * gradient * features[feature];
+                    const float margin =
+                        1.0F + logits[predicted] - logits[target];
+                    if (margin > 0.0F) {
+                        loss += margin;
+                        bias_[slot * kByteClasses + target] += learning_rate_;
+                        bias_[slot * kByteClasses + predicted] -= learning_rate_;
+                        for (std::size_t feature = 0; feature < input_dim_; ++feature) {
+                            const float update = learning_rate_ * features[feature];
+                            weights_[weight_index(slot, target, feature)] += update;
+                            weights_[weight_index(slot, predicted, feature)] -= update;
+                        }
                     }
                 }
+                ++total;
             }
             if (example_exact) {
                 ++exact;
             }
         }
-        report.cross_entropy = loss / static_cast<float>(dataset.size() * max_response_bytes_);
+        std::size_t supervised_slots = 0;
+        for (const DialogueExample& example : dataset) {
+            supervised_slots +=
+                std::min(max_response_bytes_, example.response.size() + 1);
+        }
+        // The response learner uses a multiclass margin objective. Keep the
+        // field name for report compatibility with the initial API.
+        report.cross_entropy =
+            loss / static_cast<float>(std::max<std::size_t>(1, supervised_slots));
         report.byte_accuracy = static_cast<float>(correct) / static_cast<float>(total);
         report.exact_match = static_cast<float>(exact) / static_cast<float>(dataset.size());
     }
@@ -254,14 +252,18 @@ std::string HolisticDialogueModel::respond(const std::string& input,
     for (std::size_t slot = 0; slot < max_response_bytes_; ++slot) {
         std::size_t best = 0;
         float best_logit = -std::numeric_limits<float>::infinity();
+        float second_logit = -std::numeric_limits<float>::infinity();
         for (std::size_t byte = 0; byte < kByteClasses; ++byte) {
             float value = bias_[slot * kByteClasses + byte];
             for (std::size_t feature = 0; feature < input_dim_; ++feature) {
                 value += weights_[weight_index(slot, byte, feature)] * features[feature];
             }
             if (value > best_logit) {
+                second_logit = best_logit;
                 best_logit = value;
                 best = byte;
+            } else if (value > second_logit) {
+                second_logit = value;
             }
         }
         if (best == 0) {
@@ -269,7 +271,8 @@ std::string HolisticDialogueModel::respond(const std::string& input,
         }
         result.push_back(static_cast<char>(best));
         ++decoded_slots;
-        confidence_sum += 1.0F;
+        confidence_sum +=
+            1.0F / (1.0F + std::exp(-(best_logit - second_logit)));
     }
     if (confidence != nullptr) {
         *confidence = decoded_slots == 0
