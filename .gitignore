@@ -1,32 +1,15 @@
-# Prerequisites
-*.d
+# Visual Studio
+.vs/
+build/
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.tlog/
+*.pdb
+*.ilk
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+# Generated model artifacts
+artifacts/
+*.astrax-model
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app

@@ -1,0 +1,39 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Astrax", "astrax.vcxproj", "{A8F1D8D8-8D9C-49DF-BE70-4C2E3A5FB192}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AstraxTests", "astrax_tests.vcxproj", "{F7C3C3DF-5D24-4C9D-9D71-6BDA4D9F126D}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AstraxDemo", "astrax_demo.vcxproj", "{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "osten", "..\Osten\osten.vcxproj", "{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A8F1D8D8-8D9C-49DF-BE70-4C2E3A5FB192}.Debug|x64.ActiveCfg = Debug|x64
+		{A8F1D8D8-8D9C-49DF-BE70-4C2E3A5FB192}.Debug|x64.Build.0 = Debug|x64
+		{A8F1D8D8-8D9C-49DF-BE70-4C2E3A5FB192}.Release|x64.ActiveCfg = Release|x64
+		{A8F1D8D8-8D9C-49DF-BE70-4C2E3A5FB192}.Release|x64.Build.0 = Release|x64
+		{F7C3C3DF-5D24-4C9D-9D71-6BDA4D9F126D}.Debug|x64.ActiveCfg = Debug|x64
+		{F7C3C3DF-5D24-4C9D-9D71-6BDA4D9F126D}.Debug|x64.Build.0 = Debug|x64
+		{F7C3C3DF-5D24-4C9D-9D71-6BDA4D9F126D}.Release|x64.ActiveCfg = Release|x64
+		{F7C3C3DF-5D24-4C9D-9D71-6BDA4D9F126D}.Release|x64.Build.0 = Release|x64
+		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Debug|x64.ActiveCfg = Debug|x64
+		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Debug|x64.Build.0 = Debug|x64
+		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Release|x64.ActiveCfg = Release|x64
+		{D2E0E3A8-87E4-43CF-9BD8-7D905D9A4DA3}.Release|x64.Build.0 = Release|x64
+		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Debug|x64.ActiveCfg = Debug|x64
+		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Debug|x64.Build.0 = Debug|x64
+		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Release|x64.ActiveCfg = Release|x64
+		{2E5F6C7A-0A9E-4DB8-BB59-3F1D9A7E5C01}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
