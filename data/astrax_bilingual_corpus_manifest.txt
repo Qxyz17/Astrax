@@ -1,0 +1,12 @@
+name=astrax_bilingual_corpus
+format=UTF-8 text, one complete document per line
+provenance=repository-authored bilingual technical document corpus
+training_objective=holistic denoising/reconstruction, not input-response supervision
+license=repository license applies
+bytes=10486330
+target_bytes=10485760
+documents=17806
+chinese_documents=13355
+english_documents=4451
+invalid_rows=0
+generator=tools/generate_bilingual_corpus.py

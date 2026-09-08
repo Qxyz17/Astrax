@@ -25,7 +25,6 @@ enum class OutputMode {
 };
 
 struct ModelConfig {
-    std::string version = "0.1.1-alpha";
     std::size_t state_dim = 32;
     std::size_t goal_dim = 16;
     std::size_t action_count = 8;
@@ -34,6 +33,13 @@ struct ModelConfig {
     float discount = 0.97F;
     float learning_rate = 0.02F;
     float intrinsic_reward_scale = 0.20F;
+    // Astrax combines Osten policy logits with the learned offline value path.
+    // Keeping both weights configurable avoids baking a policy into the engine.
+    float policy_guidance_weight = 0.25F;
+    float value_guidance_weight = 1.0F;
+    // Keep training bounded when a corpus is materialized by repetition to a
+    // target byte size. Unique documents are always retained first.
+    std::size_t dialogue_training_document_limit = 512;
     std::uint64_t seed = 23;
 };
 
@@ -45,7 +51,6 @@ struct Goal {
 };
 
 struct AstraxState {
-    std::string version;
     std::uint64_t iteration = 0;
     double uptime_seconds = 0.0;
     std::size_t memory_count = 0;
@@ -75,10 +80,13 @@ struct ModelOutput {
     OutputMode mode = OutputMode::Text;
     std::string text;
     std::size_t action_id = 0;
+    std::size_t engine_action_id = 0;
+    float action_value = 0.0F;
     float confidence = 0.0F;
     float intrinsic_reward = 0.0F;
     math::Vector state;
     math::Vector goal;
+    math::Vector action_values;
 };
 
 struct OfflineTransition {

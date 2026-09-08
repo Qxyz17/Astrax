@@ -24,10 +24,10 @@ int main(int argc, char** argv) {
     input.modality = astrax::Modality::Text;
     input.text = request;
     const astrax::ModelOutput text = model.step(input, astrax::OutputMode::Text);
-    std::cout << "\n[text]\n" << text.text << '\n';
+    std::cout << "\n[decision]\n" << text.text << '\n';
 
     const astrax::ModelOutput code = model.step(input, astrax::OutputMode::Code);
-    std::cout << "\n[code]\n" << code.text;
+    std::cout << "\n[second decision]\n" << code.text;
 
     const astrax::ModelOutput state = model.step(input, astrax::OutputMode::State);
     std::cout << "\n[state]\n" << state.text << '\n';

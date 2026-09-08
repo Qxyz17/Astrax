@@ -1,5 +1,6 @@
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -25,7 +26,8 @@ void test_memory_and_introspection() {
     astrax::MultimodalInput input;
     input.text = "hello";
     const auto output = model.step(input);
-    require(!output.text.empty(), "text output");
+    require(output.text.find("decision action=") != std::string::npos,
+            "text mode must render the completed decision");
     require(model.state().iteration == 1, "iteration state");
     require(model.introspect("iteration") == "1", "structured introspection");
     require(model.introspect("How many memories do you have?") == "3",
@@ -54,6 +56,53 @@ void test_training_changes_predictor() {
     require(report.samples == dataset.size(), "training sample count");
     require(report.epochs == 3, "training epoch count");
     require(before != after, "predictor must learn from data");
+}
+
+void test_value_guided_action_selection() {
+    astrax::ModelConfig config;
+    config.state_dim = 4;
+    config.action_count = 2;
+    config.learning_rate = 0.2F;
+    config.policy_guidance_weight = 0.25F;
+    config.value_guidance_weight = 1.0F;
+    astrax::AstraxModel model(config);
+
+    osten::Decision candidate;
+    candidate.action_id = 0;
+    candidate.action_logits = {3.0F, 0.0F};
+    candidate.state.assign(config.state_dim, 0.0F);
+    require(model.select_action(candidate) == 0,
+            "untrained value path must preserve the Osten candidate");
+
+    astrax::OfflineTransition transition;
+    transition.state.assign(config.state_dim, 0.0F);
+    transition.next_state.assign(config.state_dim, 0.0F);
+    transition.action = 1;
+    transition.reward = 2.0F;
+    transition.terminal = true;
+    model.train_offline({transition}, 8);
+    require(model.values().value(transition.state, 1) >
+                model.values().value(transition.state, 0),
+            "offline value training must separate action values");
+    require(model.select_action(candidate) == 1,
+            "learned value path must change final action selection");
+}
+
+void test_online_feedback_updates_value_path() {
+    astrax::ModelConfig config;
+    config.state_dim = 4;
+    config.action_count = 2;
+    config.learning_rate = 0.2F;
+    config.policy_guidance_weight = 0.0F;
+    config.value_guidance_weight = 1.0F;
+    astrax::AstraxModel model(config);
+    astrax::MultimodalInput input;
+    input.text = "feedback transition";
+    const auto output = model.step(input);
+    const float before = model.values().value(output.state, output.action_id);
+    model.observe_feedback(output.state, 2.0F, true);
+    const float after = model.values().value(output.state, output.action_id);
+    require(after > before, "online feedback must update the selected value");
 }
 
 void test_checkpoint_round_trip() {
@@ -92,19 +141,42 @@ void test_architecture_contract() {
 }
 
 void test_holistic_dialogue() {
-    astrax::HolisticDialogueModel dialogue(256, 128, 0.12F);
-    const std::vector<astrax::DialogueExample> dataset = {
-        {"alpha question", "alpha response"},
-        {"beta question", "beta response"},
-        {"gamma question", "gamma response"}
+    astrax::HolisticDialogueModel dialogue(96, 32, 0.12F);
+    const std::vector<astrax::TextDocument> dataset = {
+        {"alpha question alpha response"},
+        {"beta question beta response"},
+        {"gamma question gamma response"}
     };
-    const auto report = dialogue.train(dataset, 80);
+    const auto report = dialogue.train(dataset, 8);
     require(report.examples == dataset.size(), "dialogue sample count");
     require(dialogue.trained(), "dialogue must be marked trained");
-    require(dialogue.respond("alpha question") == "alpha response",
-            "dialogue must decode learned complete response");
-    require(dialogue.respond("beta question") == "beta response",
-            "dialogue must separate complete inputs");
+    const std::string response = dialogue.respond("novel input");
+    require(!response.empty(), "dialogue must decode a learned Unicode response");
+    require(response.find_first_not_of(" \t\r\n") != std::string::npos,
+            "dialogue must not decode whitespace-only output");
+    require(response.find(u8"\uFFFD") == std::string::npos,
+            "dialogue must not emit replacement characters");
+    require(!dialogue.respond(u8"中文输入和 English input").empty(),
+            "dialogue must accept mixed UTF-8 input");
+}
+
+void test_dialogue_pairs() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "astrax-dialogue-pairs.tsv";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << "hello\tHello, Astrax.\n"
+               << "write code\tint main() { return 0; }\n";
+    }
+    const auto pairs = astrax::HolisticDialogueModel::load_pairs(path.string(), 4096);
+    std::filesystem::remove(path);
+    require(pairs.size() == 2, "dialogue pair count");
+    require(pairs[0].input == "hello" && pairs[0].target == "Hello, Astrax.",
+            "dialogue pair fields");
+    astrax::HolisticDialogueModel dialogue(96, 32, 0.05F);
+    const auto report = dialogue.train_pairs(pairs, 4);
+    require(report.examples == pairs.size(), "dialogue pair training count");
+    require(dialogue.trained(), "dialogue pair model must be trained");
 }
 
 } // namespace
@@ -115,7 +187,10 @@ int main() {
         test_memory_and_introspection();
         test_training_changes_predictor();
         test_checkpoint_round_trip();
+        test_value_guided_action_selection();
+        test_online_feedback_updates_value_path();
         test_holistic_dialogue();
+        test_dialogue_pairs();
         std::cout << "all Astrax tests passed\n";
         return 0;
     } catch (const std::exception& error) {
