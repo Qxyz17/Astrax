@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -440,6 +441,33 @@ void AstraxModel::load_checkpoint(const std::string& path) {
     dialogue_.load(input);
     if (!input) {
         throw std::runtime_error("Astrax checkpoint is incomplete: " + path);
+    }
+}
+
+void AstraxModel::load_checkpoint_bytes(const std::vector<std::uint8_t>& bytes) {
+    std::string payload(bytes.begin(), bytes.end());
+    std::istringstream input(payload, std::ios::binary);
+    constexpr char expected_magic[] = "ASTRAX-TRAINING-CHECKPOINT";
+    char magic[sizeof(expected_magic)]{};
+    std::uint32_t format_version = 0;
+    std::uint64_t state_dim = 0;
+    std::uint64_t action_count = 0;
+    input.read(magic, sizeof(magic));
+    input.read(reinterpret_cast<char*>(&format_version), sizeof(format_version));
+    input.read(reinterpret_cast<char*>(&state_dim), sizeof(state_dim));
+    input.read(reinterpret_cast<char*>(&action_count), sizeof(action_count));
+    if (!input || std::string(magic, sizeof(magic)) !=
+            std::string(expected_magic, sizeof(expected_magic)) ||
+        format_version != 4 || state_dim != config_.state_dim ||
+        action_count != config_.action_count) {
+        throw std::runtime_error("embedded Astrax checkpoint header does not match model");
+    }
+    predictor_.load(input);
+    values_.load(input);
+    intrinsic_.load(input);
+    dialogue_.load(input);
+    if (!input) {
+        throw std::runtime_error("embedded Astrax checkpoint is incomplete");
     }
 }
 

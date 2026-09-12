@@ -14,6 +14,7 @@
 
 #include "astrax/model.hpp"
 #include "embedded_dialogue_pairs.hpp"
+#include "embedded_model.hpp"
 
 namespace {
 
@@ -165,10 +166,7 @@ int wmain(int argc, wchar_t** argv) {
 #endif
     try {
         astrax::AstraxModel model;
-        const auto pairs = embedded_pairs();
-        // Keep startup bounded. The training executable performs the full
-        // offline training; chat uses the embedded compact model path.
-        model.train_dialogue_pairs(pairs, 32);
+        model.load_checkpoint_bytes(astrax::embedded::kCheckpoint);
         model.set_goal(
             {"conversation", "Understand the complete message and answer it", 0.9F, true});
 

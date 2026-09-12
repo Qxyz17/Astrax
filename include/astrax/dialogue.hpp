@@ -95,6 +95,8 @@ private:
     std::size_t condition_dim_;
     std::size_t hidden_dim_;
     std::vector<std::uint32_t> vocabulary_;
+    std::vector<math::Vector> supervised_source_states_;
+    std::vector<std::string> supervised_targets_;
     math::Vector context_weights_;
     math::Vector context_bias_;
     math::Vector condition_weights_;

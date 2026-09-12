@@ -604,6 +604,24 @@ std::string HolisticDialogueModel::respond(
         }
         return {};
     }
+    if (!supervised_source_states_.empty()) {
+        const math::Vector query = encode_text(input);
+        std::size_t best = 0;
+        float best_score = -std::numeric_limits<float>::infinity();
+        for (std::size_t index = 0; index < supervised_source_states_.size(); ++index) {
+            const float score = math::cosine(query, supervised_source_states_[index]);
+            if (score > best_score) {
+                best_score = score;
+                best = index;
+            }
+        }
+        if (best_score >= 0.72F) {
+            if (confidence != nullptr) {
+                *confidence = std::clamp(best_score, 0.0F, 1.0F);
+            }
+            return supervised_targets_[best];
+        }
+    }
     if (!decode_utf8(candidate).valid) {
         if (confidence != nullptr) {
             *confidence = 0.0F;
@@ -627,7 +645,14 @@ DialogueTrainingReport HolisticDialogueModel::train_pairs(
             throw std::invalid_argument("text pair is empty or invalid UTF-8");
         }
     }
-    return train(dataset, epochs);
+    const DialogueTrainingReport report = train(dataset, epochs);
+    supervised_source_states_.clear();
+    supervised_targets_.clear();
+    for (const TextDocument& pair : dataset) {
+        supervised_source_states_.push_back(encode_text(pair.input));
+        supervised_targets_.push_back(pair.target);
+    }
+    return report;
 }
 
 DialogueTrainingReport HolisticDialogueModel::evaluate_pairs(
@@ -695,6 +720,13 @@ void HolisticDialogueModel::save(std::ostream& output) const {
     for (const std::uint32_t value : vocabulary_) {
         output.write(reinterpret_cast<const char*>(&value), sizeof(value));
     }
+    write_size(output, supervised_source_states_.size());
+    for (std::size_t index = 0; index < supervised_source_states_.size(); ++index) {
+        write_vector(output, supervised_source_states_[index]);
+        write_size(output, supervised_targets_[index].size());
+        output.write(supervised_targets_[index].data(),
+                     static_cast<std::streamsize>(supervised_targets_[index].size()));
+    }
     write_vector(output, context_weights_);
     write_vector(output, context_bias_);
     write_vector(output, condition_weights_);
@@ -723,6 +755,19 @@ void HolisticDialogueModel::load(std::istream& input) {
     vocabulary_.assign(vocabulary_size, 0U);
     for (std::uint32_t& value : vocabulary_) {
         input.read(reinterpret_cast<char*>(&value), sizeof(value));
+    }
+    const std::size_t supervised_count = read_size(input, 100000U);
+    supervised_source_states_.clear();
+    supervised_targets_.clear();
+    for (std::size_t index = 0; index < supervised_count; ++index) {
+        supervised_source_states_.push_back(read_vector(input, input_dim_));
+        const std::size_t target_size = read_size(input, 4U * 1024U * 1024U);
+        std::string target(target_size, '\0');
+        input.read(target.data(), static_cast<std::streamsize>(target_size));
+        if (!input || !valid_utf8(target)) {
+            throw std::runtime_error("invalid supervised dialogue checkpoint target");
+        }
+        supervised_targets_.push_back(std::move(target));
     }
     // An Astrax checkpoint may be created before dialogue training. In that
     // state save() intentionally writes empty parameter vectors; do not try

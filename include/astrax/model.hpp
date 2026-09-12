@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
+#include <vector>
 
 #include "osten/engine.hpp"
 #include "astrax/dialogue.hpp"
@@ -46,6 +48,7 @@ public:
     std::string chat(const std::string& input);
     void save_checkpoint(const std::string& path) const;
     void load_checkpoint(const std::string& path);
+    void load_checkpoint_bytes(const std::vector<std::uint8_t>& bytes);
 
     const AstraxState& state() const noexcept { return state_; }
     const ModelConfig& config() const noexcept { return config_; }
