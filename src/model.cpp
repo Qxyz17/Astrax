@@ -116,7 +116,7 @@ AstraxModel::AstraxModel(ModelConfig config)
       // This is still a compact parallel decoder, not a token generator.
       // More input features and slots are needed for mixed Chinese/English
       // text and short code blocks without falling back to a fixed renderer.
-      dialogue_(512, 256, std::max(config_.learning_rate, 0.01F), 128) {
+      dialogue_(512, 256, std::max(config_.learning_rate, 0.08F), 128) {
     if (config_.state_dim == 0 || config_.goal_dim == 0 ||
         config_.action_count == 0 || config_.memory_vector_dim == 0 ||
         config_.memory_capacity == 0 || !std::isfinite(config_.discount) ||

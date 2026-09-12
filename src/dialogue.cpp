@@ -205,19 +205,29 @@ HolisticDialogueModel::HolisticDialogueModel(std::size_t input_dim,
 
 math::Vector HolisticDialogueModel::encode_text(const std::string& input) const {
     math::Vector result(input_dim_, 0.0F);
+    math::Vector reverse_state(input_dim_, 0.0F);
     const Decoded decoded = decode_utf8(input);
     const auto& values = decoded.values;
     if (values.empty()) {
         return result;
     }
     std::size_t events = 0;
+    // Two fixed-size gated recurrences preserve information from both ends of
+    // the complete input. This is a small state-space encoder, not attention
+    // and not an autoregressive language model.
     for (std::size_t index = 0; index < values.size(); ++index) {
-        const float decay = 0.86F +
-            0.10F * static_cast<float>((index % 8U) + 1U) / 8.0F;
+        const float position = static_cast<float>(index % 64U) / 64.0F;
+        const float input_gate = 0.35F + 0.25F * std::sin(position * 6.2831853F);
+        const float forget_gate = 0.78F + 0.12F * std::cos(position * 6.2831853F);
         for (float& item : result) {
-            item *= decay;
+            item *= forget_gate;
         }
-        add_hashed(result, mix_hash(values[index] + index * 0x9e3779b9ULL), 1.0F);
+        math::Vector event(input_dim_, 0.0F);
+        add_hashed(event, mix_hash(values[index] + index * 0x9e3779b9ULL), 1.0F);
+        add_hashed(event, mix_hash(values[index] * 17U + index), input_gate);
+        for (std::size_t bucket = 0; bucket < result.size(); ++bucket) {
+            result[bucket] += input_gate * event[bucket];
+        }
         ++events;
         if (index + 1 < values.size()) {
             add_hashed(result, mix_hash(hash_codepoints(values, index, 2)), 1.2F);
@@ -235,6 +245,20 @@ math::Vector HolisticDialogueModel::encode_text(const std::string& input) const 
     }
     add_hashed(result, mix_hash(values.size()), 0.75F);
     ++events;
+    for (std::size_t offset = 0; offset < values.size(); ++offset) {
+        const std::size_t index = values.size() - offset - 1U;
+        const float position = static_cast<float>(index % 64U) / 64.0F;
+        const float input_gate = 0.30F + 0.20F * std::cos(position * 6.2831853F);
+        const float forget_gate = 0.80F + 0.10F * std::sin(position * 6.2831853F);
+        for (float& item : reverse_state) {
+            item *= forget_gate;
+        }
+        add_hashed(reverse_state, mix_hash(values[index] + index * 0x517cc1b7ULL),
+                   input_gate);
+    }
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        result[index] = 0.62F * result[index] + 0.38F * reverse_state[index];
+    }
     const float scale = 1.0F / std::sqrt(static_cast<float>(std::max<std::size_t>(1, events)));
     for (float& item : result) {
         item *= scale;
@@ -350,9 +374,20 @@ DialogueTrainingReport HolisticDialogueModel::train(
     slot_embeddings_.assign(max_response_codepoints_ * hidden_dim_, 0.0F);
     class_embeddings_.assign(class_count * hidden_dim_, 0.0F);
     class_bias_.assign(class_count, 0.0F);
+    // Do not start the encoder at the all-zero fixed point. With zero context
+    // and slot parameters, the first softmax update can only learn class
+    // frequency and no gradient can distinguish two inputs.
+    for (std::size_t index = 0; index < context_weights_.size(); ++index) {
+        const float phase = static_cast<float>((index * 17U + 11U) % 211U) / 211.0F;
+        context_weights_[index] = 0.035F * std::sin(phase * 6.2831853F);
+    }
+    for (std::size_t index = 0; index < slot_embeddings_.size(); ++index) {
+        const float phase = static_cast<float>((index * 29U + 7U) % 173U) / 173.0F;
+        slot_embeddings_[index] = 0.025F * std::cos(phase * 6.2831853F);
+    }
     for (std::size_t index = 0; index < class_embeddings_.size(); ++index) {
         const float phase = static_cast<float>((index * 37U) % 101U) / 101.0F;
-        class_embeddings_[index] = 0.02F * std::sin(phase * 6.2831853F);
+        class_embeddings_[index] = 0.15F * std::sin(phase * 6.2831853F);
     }
 
     std::unordered_map<std::uint32_t, std::size_t> class_for;
@@ -498,7 +533,7 @@ std::string HolisticDialogueModel::respond(
     // Each pass refines the complete candidate in parallel. This is not
     // left-to-right next-token generation.
     math::Vector candidate_state(input_dim_, 0.0F);
-    for (std::size_t pass = 0; pass < 4U; ++pass) {
+    for (std::size_t pass = 0; pass < 1U; ++pass) {
         const math::Vector input_features = encode_text(input);
         for (std::size_t index = 0; index < candidate_state.size(); ++index) {
             candidate_state[index] = 0.75F * candidate_state[index] +
