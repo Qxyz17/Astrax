@@ -59,6 +59,11 @@ public:
 private:
     math::Vector embed(const MultimodalInput& input) const;
     std::string context_for(const math::Vector& query);
+    // Runs Osten forward once per document and encodes the resulting state as
+    // a condition vector, so dialogue training learns the model's own thinking
+    // state rather than a fixed zero condition.
+    std::vector<math::Vector> conditions_for(
+        const std::vector<TextDocument>& dataset);
 
     ModelConfig config_;
     AstraxState state_;

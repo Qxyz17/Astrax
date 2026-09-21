@@ -114,10 +114,10 @@ AstraxModel::AstraxModel(ModelConfig config)
       values_(config_.state_dim, config_.action_count, config_.learning_rate),
       intrinsic_(config_.intrinsic_reward_scale),
       trainer_(config_, predictor_, values_, intrinsic_),
-      // This is still a compact parallel decoder, not a token generator.
-      // More input features and slots are needed for mixed Chinese/English
-      // text and short code blocks without falling back to a fixed renderer.
-      dialogue_(512, 256, std::max(config_.learning_rate, 0.08F), 128) {
+      // A compact parallel decoder, not a token generator. 64 response slots
+      // are enough for a sentence or short code block while keeping training
+      // affordable across the full Wikipedia corpus on a CPU.
+      dialogue_(256, 64, std::max(config_.learning_rate, 0.08F), 128) {
     if (config_.state_dim == 0 || config_.goal_dim == 0 ||
         config_.action_count == 0 || config_.memory_vector_dim == 0 ||
         config_.memory_capacity == 0 || !std::isfinite(config_.discount) ||
@@ -356,11 +356,30 @@ TrainingReport AstraxModel::train_offline_csv(const std::string& path,
         OfflineRLTrainer::load_csv(path, config_.state_dim), epochs);
 }
 
+std::vector<math::Vector> AstraxModel::conditions_for(
+    const std::vector<TextDocument>& dataset) {
+    std::vector<math::Vector> conditions;
+    conditions.reserve(dataset.size());
+    for (const TextDocument& document : dataset) {
+        const std::string& source = document.input.empty()
+            ? document.text : document.input;
+        // Advance Osten once for this document and encode the resulting state
+        // and goal as the condition. The condition therefore reflects the
+        // model's current thinking rather than a constant.
+        const osten::Decision decision = engine_.tick(source);
+        conditions.push_back(dialogue_.make_condition(
+            decision.state, decision.action_id, decision.action_strength,
+            decision.goal, {}));
+    }
+    return conditions;
+}
+
 DialogueTrainingReport AstraxModel::train_dialogue(
     const std::vector<TextDocument>& dataset, std::size_t epochs) {
     const std::vector<TextDocument> bounded = bounded_dialogue_dataset(
         dataset, config_.dialogue_training_document_limit);
-    return dialogue_.train(bounded, epochs);
+    const std::vector<math::Vector> conditions = conditions_for(bounded);
+    return dialogue_.train(bounded, epochs, conditions);
 }
 
 DialogueTrainingReport AstraxModel::train_dialogue_documents(
@@ -371,8 +390,10 @@ DialogueTrainingReport AstraxModel::train_dialogue_documents(
 
 DialogueTrainingReport AstraxModel::train_dialogue_pairs(
     const std::string& path, std::size_t epochs) {
-    return dialogue_.train_pairs(
-        HolisticDialogueModel::load_pairs(path, 4U * 1024U * 1024U), epochs);
+    const std::vector<TextDocument> dataset =
+        HolisticDialogueModel::load_pairs(path, 4U * 1024U * 1024U);
+    const std::vector<math::Vector> conditions = conditions_for(dataset);
+    return dialogue_.train_pairs(dataset, epochs, conditions);
 }
 
 DialogueTrainingReport AstraxModel::train_dialogue_pairs(
@@ -381,9 +402,11 @@ DialogueTrainingReport AstraxModel::train_dialogue_pairs(
     if (limit != 0U && dataset.size() > limit) {
         std::vector<TextDocument> bounded(dataset.begin(),
                                           dataset.begin() + static_cast<std::ptrdiff_t>(limit));
-        return dialogue_.train_pairs(bounded, epochs);
+        const std::vector<math::Vector> conditions = conditions_for(bounded);
+        return dialogue_.train_pairs(bounded, epochs, conditions);
     }
-    return dialogue_.train_pairs(dataset, epochs);
+    const std::vector<math::Vector> conditions = conditions_for(dataset);
+    return dialogue_.train_pairs(dataset, epochs, conditions);
 }
 
 std::string AstraxModel::chat(const std::string& input) {
@@ -399,7 +422,7 @@ void AstraxModel::save_checkpoint(const std::string& path) const {
         throw std::runtime_error("cannot create Astrax checkpoint: " + path);
     }
     constexpr char magic[] = "ASTRAX-TRAINING-CHECKPOINT";
-    constexpr std::uint32_t format_version = 4;
+    constexpr std::uint32_t format_version = 5;
     output.write(magic, sizeof(magic));
     output.write(reinterpret_cast<const char*>(&format_version), sizeof(format_version));
     const std::uint64_t state_dim = config_.state_dim;
@@ -431,7 +454,7 @@ void AstraxModel::load_checkpoint(const std::string& path) {
     input.read(reinterpret_cast<char*>(&action_count), sizeof(action_count));
     if (!input || std::string(magic, sizeof(magic)) !=
             std::string(expected_magic, sizeof(expected_magic)) ||
-        format_version != 4 || state_dim != config_.state_dim ||
+        format_version != 5 || state_dim != config_.state_dim ||
         action_count != config_.action_count) {
         throw std::runtime_error("Astrax checkpoint header does not match model");
     }
@@ -458,7 +481,7 @@ void AstraxModel::load_checkpoint_bytes(const std::vector<std::uint8_t>& bytes) 
     input.read(reinterpret_cast<char*>(&action_count), sizeof(action_count));
     if (!input || std::string(magic, sizeof(magic)) !=
             std::string(expected_magic, sizeof(expected_magic)) ||
-        format_version != 4 || state_dim != config_.state_dim ||
+        format_version != 5 || state_dim != config_.state_dim ||
         action_count != config_.action_count) {
         throw std::runtime_error("embedded Astrax checkpoint header does not match model");
     }

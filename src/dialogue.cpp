@@ -1,4 +1,4 @@
-﻿#pragma warning(disable: 4267)
+#pragma warning(disable: 4267)
 #include "astrax/dialogue.hpp"
 
 #include <algorithm>
@@ -9,22 +9,17 @@
 #include <istream>
 #include <limits>
 #include <ostream>
+#include <random>
 #include <sstream>
+#include <mutex>
 #include <stdexcept>
-#include <unordered_map>
+#include <thread>
 #include <utility>
+
+#include "astrax/charset.hpp"
 
 namespace astrax {
 namespace {
-
-// The decoder is character/codepoint based, not byte based.  The old 128
-// entry vocabulary silently mapped most Chinese codepoints to the end class,
-// which made a trained model look like a broken fixed-answer renderer.  The
-// corpus currently contains fewer than 512 distinct codepoints, so keep room
-// for a real Unicode vocabulary while retaining a small research model.
-constexpr std::size_t kHiddenDim = 96;
-constexpr std::size_t kMaxVocabulary = 1024;
-constexpr std::size_t kNegativeSamples = 24;
 
 std::uint64_t mix_hash(std::uint64_t value) {
     value ^= value >> 30U;
@@ -63,11 +58,6 @@ bool append_codepoint(std::uint32_t value, std::string& output) {
         return false;
     }
     return true;
-}
-
-bool is_layout_codepoint(std::uint32_t value) {
-    return value == 0x09U || value == 0x0AU || value == 0x0DU ||
-           value == 0x20U || value == 0xA0U;
 }
 
 struct Decoded {
@@ -126,8 +116,8 @@ Decoded decode_utf8(const std::string& value) {
             continue;
         }
         if (codepoint != 0U &&
-            (codepoint >= 0x20U || codepoint == '\n' ||
-             codepoint == '\r' || codepoint == '\t')) {
+            (codepoint >= 0x20U || codepoint == 10U ||
+             codepoint == 13U || codepoint == 9U)) {
             result.values.push_back(codepoint);
         }
         index += length;
@@ -195,12 +185,16 @@ HolisticDialogueModel::HolisticDialogueModel(std::size_t input_dim,
     : input_dim_(input_dim),
       max_response_codepoints_(max_response_codepoints),
       learning_rate_(learning_rate),
-      condition_dim_(condition_dim),
-      hidden_dim_(kHiddenDim) {
+      condition_dim_(condition_dim) {
     if (input_dim_ == 0 || max_response_codepoints_ == 0 || condition_dim_ == 0 ||
         !std::isfinite(learning_rate_) || learning_rate_ <= 0.0F) {
         throw std::invalid_argument("invalid holistic dialogue configuration");
     }
+    if (rounds_ == 0U) {
+        throw std::invalid_argument("holistic dialogue requires at least one round");
+    }
+    high_count_ = charset::kHighCount;
+    low_count_ = charset::kLowCount;
 }
 
 math::Vector HolisticDialogueModel::encode_text(const std::string& input) const {
@@ -212,9 +206,6 @@ math::Vector HolisticDialogueModel::encode_text(const std::string& input) const 
         return result;
     }
     std::size_t events = 0;
-    // Two fixed-size gated recurrences preserve information from both ends of
-    // the complete input. This is a small state-space encoder, not attention
-    // and not an autoregressive language model.
     for (std::size_t index = 0; index < values.size(); ++index) {
         const float position = static_cast<float>(index % 64U) / 64.0F;
         const float input_gate = 0.35F + 0.25F * std::sin(position * 6.2831853F);
@@ -299,26 +290,381 @@ math::Vector HolisticDialogueModel::encode_condition(
     return result;
 }
 
-math::Vector HolisticDialogueModel::hidden_for(const math::Vector& features,
-                                                const math::Vector& condition,
-                                                std::size_t slot) const {
-    const std::size_t combined_dim = input_dim_ + condition_dim_;
-    math::Vector hidden(hidden_dim_, 0.0F);
-    for (std::size_t row = 0; row < hidden_dim_; ++row) {
-        float value = context_bias_[row] + slot_embeddings_[slot * hidden_dim_ + row];
-        for (std::size_t column = 0; column < input_dim_; ++column) {
-            value += context_weights_[row * combined_dim + column] * features[column];
-        }
-        for (std::size_t column = 0; column < condition_dim_; ++column) {
-            value += condition_weights_[row * condition_dim_ + column] * condition[column];
-        }
-        hidden[row] = std::tanh(value);
+math::Vector HolisticDialogueModel::softmax(const math::Vector& logits) {
+    math::Vector result(logits.size(), 0.0F);
+    if (logits.empty()) {
+        return result;
     }
-    return hidden;
+    float maximum = -std::numeric_limits<float>::infinity();
+    for (const float value : logits) {
+        maximum = std::max(maximum, value);
+    }
+    float normalizer = 0.0F;
+    for (std::size_t index = 0; index < logits.size(); ++index) {
+        result[index] = std::exp(logits[index] - maximum);
+        normalizer += result[index];
+    }
+    if (normalizer <= 1.0e-12F) {
+        return math::Vector(logits.size(), 1.0F / static_cast<float>(logits.size()));
+    }
+    for (float& value : result) {
+        value /= normalizer;
+    }
+    return result;
+}
+
+void HolisticDialogueModel::forward_pass(
+    const math::Vector& features, const math::Vector& condition,
+    const math::Vector& aggregate, std::size_t round,
+    std::vector<SlotLogits>& logits) const {
+    logits.assign(max_response_codepoints_, SlotLogits{
+        math::Vector(high_count_, 0.0F), math::Vector(low_count_, 0.0F)});
+    const std::size_t agg = std::min(aggregate.size(), agg_dim_);
+    // Precompute the slot-independent projection once per pass. Input,
+    // condition, aggregate, and bias are identical for every slot; only the
+    // slot and round embeddings vary. This keeps the denoising loop affordable
+    // at research scale.
+    math::Vector base(hidden_dim_, 0.0F);
+    for (std::size_t h = 0; h < hidden_dim_; ++h) {
+        float value = hidden_bias_[h];
+        const std::size_t in_row = h * input_dim_;
+        for (std::size_t column = 0; column < input_dim_; ++column) {
+            value += in_weights_[in_row + column] * features[column];
+        }
+        const std::size_t cond_row = h * condition_dim_;
+        for (std::size_t column = 0; column < condition_dim_; ++column) {
+            value += cond_weights_[cond_row + column] * condition[column];
+        }
+        const std::size_t agg_row = h * agg_dim_;
+        for (std::size_t column = 0; column < agg; ++column) {
+            value += agg_weights_[agg_row + column] * aggregate[column];
+        }
+        base[h] = value;
+    }
+    for (std::size_t slot = 0; slot < max_response_codepoints_; ++slot) {
+        math::Vector hidden(hidden_dim_, 0.0F);
+        for (std::size_t h = 0; h < hidden_dim_; ++h) {
+            float value = base[h];
+            const std::size_t slot_row = h * slot_dim_;
+            for (std::size_t column = 0; column < slot_dim_; ++column) {
+                value += slot_weights_[slot_row + column] *
+                    slot_embedding_table_[slot * slot_dim_ + column];
+            }
+            const std::size_t round_row = h * round_dim_;
+            for (std::size_t column = 0; column < round_dim_; ++column) {
+                value += round_weights_[round_row + column] *
+                    round_embedding_table_[round * round_dim_ + column];
+            }
+            hidden[h] = std::tanh(value);
+        }
+        SlotLogits& slot_logits = logits[slot];
+        for (std::size_t c = 0; c < high_count_; ++c) {
+            float value = out_high_bias_[c];
+            const std::size_t row = c * hidden_dim_;
+            for (std::size_t h = 0; h < hidden_dim_; ++h) {
+                value += out_high_weights_[row + h] * hidden[h];
+            }
+            slot_logits.high[c] = value;
+        }
+        for (std::size_t c = 0; c < low_count_; ++c) {
+            float value = out_low_bias_[c];
+            const std::size_t row = c * hidden_dim_;
+            for (std::size_t h = 0; h < hidden_dim_; ++h) {
+                value += out_low_weights_[row + h] * hidden[h];
+            }
+            slot_logits.low[c] = value;
+        }
+    }
+}
+
+math::Vector HolisticDialogueModel::aggregate_slots(
+    const std::vector<SlotLogits>& logits) const {
+    math::Vector aggregate(agg_dim_, 0.0F);
+    if (logits.empty()) {
+        return aggregate;
+    }
+    for (std::size_t slot = 0; slot < logits.size(); ++slot) {
+        const math::Vector high_probabilities = softmax(logits[slot].high);
+        for (std::size_t c = 0; c < high_probabilities.size(); ++c) {
+            const std::uint64_t hash = mix_hash(
+                static_cast<std::uint64_t>(slot) * 0x9e3779b97f4a7c15ULL +
+                static_cast<std::uint64_t>(c) * 0xbf58476d1ce4e5b9ULL);
+            aggregate[hash % agg_dim_] += high_probabilities[c];
+        }
+        const math::Vector low_probabilities = softmax(logits[slot].low);
+        for (std::size_t c = 0; c < low_probabilities.size(); ++c) {
+            const std::uint64_t hash = mix_hash(
+                static_cast<std::uint64_t>(slot) * 0x94d049bb133111ebULL +
+                static_cast<std::uint64_t>(c) * 0x2545f4914f6cdd1dULL + 0x9e3779b9ULL);
+            aggregate[hash % agg_dim_] += low_probabilities[c];
+        }
+    }
+    const float length = math::norm(aggregate);
+    if (length > 1.0F) {
+        for (float& value : aggregate) {
+            value /= length;
+        }
+    }
+    return aggregate;
+}
+
+float HolisticDialogueModel::train_pass(
+    const math::Vector& features, const math::Vector& condition,
+    const math::Vector& aggregate, std::size_t round,
+    const std::vector<std::uint32_t>& targets, const std::vector<char>& active) {
+    const std::size_t agg = std::min(aggregate.size(), agg_dim_);
+    float total_loss = 0.0F;
+    std::size_t active_count = 0;
+    // Slot-independent projection, computed once per pass.
+    math::Vector base(hidden_dim_, 0.0F);
+    for (std::size_t h = 0; h < hidden_dim_; ++h) {
+        float value = hidden_bias_[h];
+        const std::size_t in_row = h * input_dim_;
+        for (std::size_t column = 0; column < input_dim_; ++column) {
+            value += in_weights_[in_row + column] * features[column];
+        }
+        const std::size_t cond_row = h * condition_dim_;
+        for (std::size_t column = 0; column < condition_dim_; ++column) {
+            value += cond_weights_[cond_row + column] * condition[column];
+        }
+        const std::size_t agg_row = h * agg_dim_;
+        for (std::size_t column = 0; column < agg; ++column) {
+            value += agg_weights_[agg_row + column] * aggregate[column];
+        }
+        base[h] = value;
+    }
+    for (std::size_t slot = 0; slot < max_response_codepoints_; ++slot) {
+        if (slot >= active.size() || active[slot] == 0) {
+            continue;
+        }
+        const std::uint32_t codepoint = targets[slot];
+        const std::size_t target_high = charset::high_of(codepoint);
+        const std::size_t target_low = charset::low_of(codepoint);
+        math::Vector hidden(hidden_dim_, 0.0F);
+        for (std::size_t h = 0; h < hidden_dim_; ++h) {
+            float value = base[h];
+            const std::size_t slot_row = h * slot_dim_;
+            for (std::size_t column = 0; column < slot_dim_; ++column) {
+                value += slot_weights_[slot_row + column] *
+                    slot_embedding_table_[slot * slot_dim_ + column];
+            }
+            const std::size_t round_row = h * round_dim_;
+            for (std::size_t column = 0; column < round_dim_; ++column) {
+                value += round_weights_[round_row + column] *
+                    round_embedding_table_[round * round_dim_ + column];
+            }
+            hidden[h] = std::tanh(value);
+        }
+        math::Vector high_logits(high_count_, 0.0F);
+        float high_maximum = -std::numeric_limits<float>::infinity();
+        for (std::size_t c = 0; c < high_count_; ++c) {
+            float value = out_high_bias_[c];
+            const std::size_t row = c * hidden_dim_;
+            for (std::size_t h = 0; h < hidden_dim_; ++h) {
+                value += out_high_weights_[row + h] * hidden[h];
+            }
+            high_logits[c] = value;
+            high_maximum = std::max(high_maximum, value);
+        }
+        float high_normalizer = 0.0F;
+        for (const float value : high_logits) {
+            high_normalizer += std::exp(value - high_maximum);
+        }
+        high_normalizer = std::max(high_normalizer, 1.0e-12F);
+        math::Vector low_logits(low_count_, 0.0F);
+        float low_maximum = -std::numeric_limits<float>::infinity();
+        for (std::size_t c = 0; c < low_count_; ++c) {
+            float value = out_low_bias_[c];
+            const std::size_t row = c * hidden_dim_;
+            for (std::size_t h = 0; h < hidden_dim_; ++h) {
+                value += out_low_weights_[row + h] * hidden[h];
+            }
+            low_logits[c] = value;
+            low_maximum = std::max(low_maximum, value);
+        }
+        float low_normalizer = 0.0F;
+        for (const float value : low_logits) {
+            low_normalizer += std::exp(value - low_maximum);
+        }
+        low_normalizer = std::max(low_normalizer, 1.0e-12F);
+        total_loss += -(high_logits[target_high] - high_maximum -
+                        std::log(high_normalizer));
+        total_loss += -(low_logits[target_low] - low_maximum -
+                        std::log(low_normalizer));
+        ++active_count;
+
+        math::Vector hidden_gradient(hidden_dim_, 0.0F);
+        for (std::size_t c = 0; c < high_count_; ++c) {
+            const float probability = std::exp(high_logits[c] - high_maximum) /
+                                      high_normalizer;
+            const float g = (probability - (c == target_high ? 1.0F : 0.0F)) *
+                            learning_rate_;
+            out_high_bias_[c] -= g;
+            const std::size_t row = c * hidden_dim_;
+            for (std::size_t h = 0; h < hidden_dim_; ++h) {
+                hidden_gradient[h] += g * out_high_weights_[row + h];
+                out_high_weights_[row + h] -= g * hidden[h];
+            }
+        }
+        for (std::size_t c = 0; c < low_count_; ++c) {
+            const float probability = std::exp(low_logits[c] - low_maximum) /
+                                      low_normalizer;
+            const float g = (probability - (c == target_low ? 1.0F : 0.0F)) *
+                            learning_rate_;
+            out_low_bias_[c] -= g;
+            const std::size_t row = c * hidden_dim_;
+            for (std::size_t h = 0; h < hidden_dim_; ++h) {
+                hidden_gradient[h] += g * out_low_weights_[row + h];
+                out_low_weights_[row + h] -= g * hidden[h];
+            }
+        }
+        math::Vector pre_gradient(hidden_dim_, 0.0F);
+        for (std::size_t h = 0; h < hidden_dim_; ++h) {
+            pre_gradient[h] = hidden_gradient[h] * (1.0F - hidden[h] * hidden[h]);
+        }
+        for (std::size_t h = 0; h < hidden_dim_; ++h) {
+            const float g = pre_gradient[h];
+            hidden_bias_[h] -= g;
+            const std::size_t in_row = h * input_dim_;
+            for (std::size_t column = 0; column < input_dim_; ++column) {
+                in_weights_[in_row + column] -= g * features[column];
+            }
+            const std::size_t cond_row = h * condition_dim_;
+            for (std::size_t column = 0; column < condition_dim_; ++column) {
+                cond_weights_[cond_row + column] -= g * condition[column];
+            }
+            const std::size_t slot_row = h * slot_dim_;
+            for (std::size_t column = 0; column < slot_dim_; ++column) {
+                const float embedding = slot_embedding_table_[slot * slot_dim_ + column];
+                const float weight = slot_weights_[slot_row + column];
+                slot_weights_[slot_row + column] -= g * embedding;
+                slot_embedding_table_[slot * slot_dim_ + column] -= g * weight;
+            }
+            const std::size_t round_row = h * round_dim_;
+            for (std::size_t column = 0; column < round_dim_; ++column) {
+                const float embedding = round_embedding_table_[round * round_dim_ + column];
+                const float weight = round_weights_[round_row + column];
+                round_weights_[round_row + column] -= g * embedding;
+                round_embedding_table_[round * round_dim_ + column] -= g * weight;
+            }
+            const std::size_t agg_row = h * agg_dim_;
+            for (std::size_t column = 0; column < agg; ++column) {
+                agg_weights_[agg_row + column] -= g * aggregate[column];
+            }
+        }
+    }
+    return active_count == 0U ? 0.0F : total_loss / static_cast<float>(active_count);
+}
+HolisticDialogueModel::Replica HolisticDialogueModel::capture() const {
+    Replica replica;
+    replica.in_weights = in_weights_;
+    replica.cond_weights = cond_weights_;
+    replica.slot_weights = slot_weights_;
+    replica.round_weights = round_weights_;
+    replica.agg_weights = agg_weights_;
+    replica.hidden_bias = hidden_bias_;
+    replica.out_high_weights = out_high_weights_;
+    replica.out_high_bias = out_high_bias_;
+    replica.out_low_weights = out_low_weights_;
+    replica.out_low_bias = out_low_bias_;
+    replica.slot_embedding_table = slot_embedding_table_;
+    replica.round_embedding_table = round_embedding_table_;
+    return replica;
+}
+
+void HolisticDialogueModel::install(const Replica& replica) {
+    in_weights_ = replica.in_weights;
+    cond_weights_ = replica.cond_weights;
+    slot_weights_ = replica.slot_weights;
+    round_weights_ = replica.round_weights;
+    agg_weights_ = replica.agg_weights;
+    hidden_bias_ = replica.hidden_bias;
+    out_high_weights_ = replica.out_high_weights;
+    out_high_bias_ = replica.out_high_bias;
+    out_low_weights_ = replica.out_low_weights;
+    out_low_bias_ = replica.out_low_bias;
+    slot_embedding_table_ = replica.slot_embedding_table;
+    round_embedding_table_ = replica.round_embedding_table;
+}
+
+void HolisticDialogueModel::accumulate(const Replica& replica) {
+    const auto add = [](math::Vector& target, const math::Vector& source) {
+        for (std::size_t index = 0; index < target.size(); ++index) {
+            target[index] += source[index];
+        }
+    };
+    add(in_weights_, replica.in_weights);
+    add(cond_weights_, replica.cond_weights);
+    add(slot_weights_, replica.slot_weights);
+    add(round_weights_, replica.round_weights);
+    add(agg_weights_, replica.agg_weights);
+    add(hidden_bias_, replica.hidden_bias);
+    add(out_high_weights_, replica.out_high_weights);
+    add(out_high_bias_, replica.out_high_bias);
+    add(out_low_weights_, replica.out_low_weights);
+    add(out_low_bias_, replica.out_low_bias);
+    add(slot_embedding_table_, replica.slot_embedding_table);
+    add(round_embedding_table_, replica.round_embedding_table);
+}
+
+void HolisticDialogueModel::train_range(
+    const std::vector<TextDocument>& dataset,
+    const std::vector<math::Vector>& conditions,
+    std::size_t begin, std::size_t end, float& loss,
+    std::size_t& total_slots, std::size_t& correct_slots) {
+    loss = 0.0F;
+    total_slots = 0;
+    correct_slots = 0;
+    std::vector<SlotLogits> logits;
+    for (std::size_t document_index = begin; document_index < end;
+         ++document_index) {
+        const TextDocument& document = dataset[document_index];
+        const std::string& source_text = document.input.empty()
+            ? document.text : document.input;
+        const std::string& target_text = document.target.empty()
+            ? document.text : document.target;
+        const Decoded target_values = decode_utf8(target_text);
+        if (target_values.values.empty()) {
+            continue;
+        }
+        const math::Vector features = encode_text(source_text);
+        const math::Vector condition = conditions.empty()
+            ? encode_condition({}, 0U, 0.0F, {}, {})
+            : conditions[document_index];
+        const std::size_t length = std::min(
+            target_values.values.size(), max_response_codepoints_);
+        std::vector<std::uint32_t> targets(max_response_codepoints_, 0U);
+        std::vector<char> active(max_response_codepoints_, 0);
+        for (std::size_t slot = 0; slot < length; ++slot) {
+            targets[slot] = target_values.values[slot];
+            active[slot] = 1;
+        }
+        math::Vector aggregate(agg_dim_, 0.0F);
+        for (std::size_t round = 0; round < rounds_; ++round) {
+            loss += train_pass(features, condition, aggregate, round, targets,
+                               active);
+            forward_pass(features, condition, aggregate, round, logits);
+            for (std::size_t slot = 0; slot < length; ++slot) {
+                ++total_slots;
+                const std::uint32_t predicted = charset::combine(
+                    static_cast<std::uint32_t>(math::argmax(logits[slot].high)),
+                    static_cast<std::uint32_t>(math::argmax(logits[slot].low)));
+                if (predicted == targets[slot]) {
+                    ++correct_slots;
+                }
+            }
+            aggregate = aggregate_slots(logits);
+        }
+    }
 }
 
 DialogueTrainingReport HolisticDialogueModel::train(
-    const std::vector<TextDocument>& dataset, std::size_t epochs) {
+    const std::vector<TextDocument>& dataset, std::size_t epochs,
+    const std::vector<math::Vector>& conditions) {
+    if (!conditions.empty() && conditions.size() != dataset.size()) {
+        throw std::invalid_argument(
+            "condition count must match the text training document count");
+    }
     for (const TextDocument& document : dataset) {
         const std::string& source = document.input.empty()
             ? document.text : document.input;
@@ -341,165 +687,134 @@ DialogueTrainingReport HolisticDialogueModel::train(
         return report;
     }
 
-    std::unordered_map<std::uint32_t, std::size_t> frequency;
-    for (const TextDocument& document : dataset) {
-        const std::string& target_text = document.target.empty()
-            ? document.text : document.target;
-        for (const std::uint32_t value : decode_utf8(target_text).values) {
-            ++frequency[value];
+    // The model is told the complete Unicode codepoint space and selects any
+    // codepoint itself. There is no data-derived vocabulary: the output layer
+    // is factorized into a high part and a low part over the full range.
+    const bool fresh = in_weights_.empty();
+    if (fresh) {
+        in_weights_.assign(hidden_dim_ * input_dim_, 0.0F);
+        cond_weights_.assign(hidden_dim_ * condition_dim_, 0.0F);
+        slot_weights_.assign(hidden_dim_ * slot_dim_, 0.0F);
+        round_weights_.assign(hidden_dim_ * round_dim_, 0.0F);
+        agg_weights_.assign(hidden_dim_ * agg_dim_, 0.0F);
+        hidden_bias_.assign(hidden_dim_, 0.0F);
+        out_high_weights_.assign(high_count_ * hidden_dim_, 0.0F);
+        out_high_bias_.assign(high_count_, 0.0F);
+        out_low_weights_.assign(low_count_ * hidden_dim_, 0.0F);
+        out_low_bias_.assign(low_count_, 0.0F);
+        slot_embedding_table_.assign(max_response_codepoints_ * slot_dim_, 0.0F);
+        round_embedding_table_.assign(rounds_ * round_dim_, 0.0F);
+        for (std::size_t index = 0; index < in_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 17U + 11U) % 211U) / 211.0F;
+            in_weights_[index] = 0.03F * std::sin(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < cond_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 23U + 5U) % 197U) / 197.0F;
+            cond_weights_[index] = 0.03F * std::cos(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < slot_embedding_table_.size(); ++index) {
+            const float phase = static_cast<float>((index * 29U + 7U) % 173U) / 173.0F;
+            slot_embedding_table_[index] = 0.1F * std::cos(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < round_embedding_table_.size(); ++index) {
+            const float phase = static_cast<float>((index * 13U + 3U) % 149U) / 149.0F;
+            round_embedding_table_[index] = 0.1F * std::sin(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < slot_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 31U + 2U) % 181U) / 181.0F;
+            slot_weights_[index] = 0.05F * std::sin(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < round_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 19U + 9U) % 167U) / 167.0F;
+            round_weights_[index] = 0.05F * std::cos(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < agg_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 37U + 4U) % 193U) / 193.0F;
+            agg_weights_[index] = 0.04F * std::sin(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < out_high_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 41U) % 199U) / 199.0F;
+            out_high_weights_[index] = 0.08F * std::sin(phase * 6.2831853F);
+        }
+        for (std::size_t index = 0; index < out_low_weights_.size(); ++index) {
+            const float phase = static_cast<float>((index * 43U + 6U) % 211U) / 211.0F;
+            out_low_weights_[index] = 0.05F * std::sin(phase * 6.2831853F);
         }
     }
-    std::vector<std::uint32_t> candidates;
-    candidates.reserve(frequency.size());
-    for (const auto& item : frequency) {
-        candidates.push_back(item.first);
-    }
-    std::sort(candidates.begin(), candidates.end(), [&](std::uint32_t left,
-                                                         std::uint32_t right) {
-        if (frequency[left] != frequency[right]) {
-            return frequency[left] > frequency[right];
-        }
-        return left < right;
-    });
-    if (candidates.size() > kMaxVocabulary) {
-        candidates.resize(kMaxVocabulary);
-    }
-    std::sort(candidates.begin(), candidates.end());
-    vocabulary_ = std::move(candidates);
-    const std::size_t class_count = vocabulary_.size() + 1U;
-    const std::size_t combined_dim = input_dim_ + condition_dim_;
-    context_weights_.assign(hidden_dim_ * combined_dim, 0.0F);
-    context_bias_.assign(hidden_dim_, 0.0F);
-    condition_weights_.assign(hidden_dim_ * condition_dim_, 0.0F);
-    slot_embeddings_.assign(max_response_codepoints_ * hidden_dim_, 0.0F);
-    class_embeddings_.assign(class_count * hidden_dim_, 0.0F);
-    class_bias_.assign(class_count, 0.0F);
-    // Do not start the encoder at the all-zero fixed point. With zero context
-    // and slot parameters, the first softmax update can only learn class
-    // frequency and no gradient can distinguish two inputs.
-    for (std::size_t index = 0; index < context_weights_.size(); ++index) {
-        const float phase = static_cast<float>((index * 17U + 11U) % 211U) / 211.0F;
-        context_weights_[index] = 0.035F * std::sin(phase * 6.2831853F);
-    }
-    for (std::size_t index = 0; index < slot_embeddings_.size(); ++index) {
-        const float phase = static_cast<float>((index * 29U + 7U) % 173U) / 173.0F;
-        slot_embeddings_[index] = 0.025F * std::cos(phase * 6.2831853F);
-    }
-    for (std::size_t index = 0; index < class_embeddings_.size(); ++index) {
-        const float phase = static_cast<float>((index * 37U) % 101U) / 101.0F;
-        class_embeddings_[index] = 0.15F * std::sin(phase * 6.2831853F);
-    }
 
-    std::unordered_map<std::uint32_t, std::size_t> class_for;
-    for (std::size_t index = 0; index < vocabulary_.size(); ++index) {
-        class_for[vocabulary_[index]] = index + 1U;
-    }
+    const std::size_t worker_count = std::max<std::size_t>(
+        1U, std::min<std::size_t>(dataset.size(),
+                                  std::thread::hardware_concurrency()));
 
-    std::size_t total_slots = 0;
-    std::size_t correct_slots = 0;
-    float total_loss = 0.0F;
     for (std::size_t epoch = 0; epoch < epochs; ++epoch) {
-        total_slots = 0;
-        correct_slots = 0;
-        total_loss = 0.0F;
-        for (std::size_t document_index = 0; document_index < dataset.size(); ++document_index) {
-            const TextDocument& document = dataset[document_index];
-            const std::string& source_text = document.input.empty()
-                ? document.text : document.input;
-            const std::string& target_text = document.target.empty()
-                ? document.text : document.target;
-            const Decoded decoded = decode_utf8(target_text);
-            if (decoded.values.empty()) {
-                continue;
+        // Data-parallel epoch: every worker trains a private replica from the
+        // same snapshot over a distinct document range, and the replicas are
+        // averaged back. This keeps the learned parameters identical in kind
+        // to single-threaded SGD while using all cores.
+        const Replica snapshot = capture();
+        std::vector<Replica> replicas(worker_count);
+        std::vector<float> losses(worker_count, 0.0F);
+        std::vector<std::size_t> slot_counts(worker_count, 0U);
+        std::vector<std::size_t> correct_counts(worker_count, 0U);
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        const std::size_t chunk = dataset.size() / worker_count;
+        const std::size_t remainder = dataset.size() % worker_count;
+        std::size_t cursor = 0;
+        for (std::size_t worker = 0; worker < worker_count; ++worker) {
+            const std::size_t begin = cursor;
+            const std::size_t length = chunk + (worker < remainder ? 1U : 0U);
+            cursor += length;
+            const std::size_t end = cursor;
+            workers.emplace_back([this, &dataset, &conditions, &snapshot,
+                                  &replicas, &losses, &slot_counts,
+                                  &correct_counts, begin, end, worker]() {
+                // Each worker owns a private model replica so no two threads
+                // ever write the same parameter memory. The replica starts
+                // from this epoch's snapshot and is merged after the join.
+                HolisticDialogueModel local = *this;
+                local.install(snapshot);
+                local.train_range(dataset, conditions, begin, end,
+                                  losses[worker], slot_counts[worker],
+                                  correct_counts[worker]);
+                replicas[worker] = local.capture();
+            });
+        }
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+        // Average the replicas back into the live parameters. Install the
+        // first replica, then accumulate the rest, then scale by 1/worker.
+        install(replicas.front());
+        for (std::size_t worker = 1; worker < worker_count; ++worker) {
+            accumulate(replicas[worker]);
+        }
+        const float inverse = 1.0F / static_cast<float>(worker_count);
+        const auto scale = [inverse](math::Vector& values) {
+            for (float& value : values) {
+                value *= inverse;
             }
-             // The source is masked as a whole sequence. Pair targets remain
-             // separate, so a response cannot leak into its own input.
-             // Pair training must preserve the complete user input. Masking
-             // belongs to document reconstruction, but would erase the exact
-             // intent signal needed for input-to-target supervision.
-             const math::Vector features = encode_text(source_text);
-            // Language pretraining has no action labels.  Use the neutral
-            // condition so random document indices cannot be memorized as
-            // pseudo-semantics.  At inference the same learned representation
-            // is conditioned by Osten's live state/action/value path.
-            const math::Vector condition =
-                encode_condition({}, 0U, 0.0F, {}, {});
-            const std::size_t target_length = std::min(
-                decoded.values.size(),
-                max_response_codepoints_ > 0U
-                    ? max_response_codepoints_ - 1U
-                    : 0U);
-            // Train actual target positions and exactly one end slot. Training
-            // every remaining slot as end would overwhelm real characters and
-            // collapse a parallel decoder to a trivial high-frequency class.
-            const std::size_t slots = std::min(
-                max_response_codepoints_, target_length + 1U);
-            for (std::size_t slot = 0; slot < slots; ++slot) {
-                const std::size_t target = slot < target_length
-                    ? (class_for.count(decoded.values[slot]) != 0U
-                        ? class_for[decoded.values[slot]] : 0U)
-                    : 0U;
-                math::Vector hidden = hidden_for(features, condition, slot);
-                math::Vector scores(class_count, 0.0F);
-                float maximum = -std::numeric_limits<float>::infinity();
-                for (std::size_t current = 0; current < class_count; ++current) {
-                    float score = class_bias_[current];
-                    for (std::size_t h = 0; h < hidden_dim_; ++h) {
-                        score += class_embeddings_[current * hidden_dim_ + h] * hidden[h];
-                    }
-                    scores[current] = score;
-                    maximum = std::max(maximum, score);
-                }
-                float normalizer = 0.0F;
-                for (const float score : scores) {
-                    normalizer += std::exp(score - maximum);
-                }
-                total_loss += -(scores[target] - maximum -
-                    std::log(std::max(normalizer, 1.0e-12F)));
-                const std::size_t best = static_cast<std::size_t>(
-                    std::distance(scores.begin(),
-                                  std::max_element(scores.begin(), scores.end())));
-                ++total_slots;
-                if (best == target) {
-                    ++correct_slots;
-                }
-                for (std::size_t current = 0; current < class_count; ++current) {
-                    const float probability = std::exp(scores[current] - maximum) /
-                        std::max(normalizer, 1.0e-12F);
-                    const float gradient = learning_rate_ *
-                        (probability - (current == target ? 1.0F : 0.0F));
-                    class_bias_[current] -= gradient;
-                    for (std::size_t h = 0; h < hidden_dim_; ++h) {
-                        class_embeddings_[current * hidden_dim_ + h] -= gradient * hidden[h];
-                    }
-                }
-                // Backpropagate the classifier error into the fixed-size
-                // state-space encoder and slot state. Without this path, the
-                // model can only learn character frequencies, not an input to
-                // target mapping.
-                for (std::size_t h = 0; h < hidden_dim_; ++h) {
-                    float hidden_gradient = 0.0F;
-                    for (std::size_t current = 0; current < class_count; ++current) {
-                        const float probability = std::exp(scores[current] - maximum) /
-                            std::max(normalizer, 1.0e-12F);
-                        hidden_gradient += learning_rate_ *
-                            (probability - (current == target ? 1.0F : 0.0F)) *
-                            class_embeddings_[current * hidden_dim_ + h];
-                    }
-                    const float preactivation_gradient = hidden_gradient *
-                        (1.0F - hidden[h] * hidden[h]);
-                    context_bias_[h] -= preactivation_gradient;
-                    slot_embeddings_[slot * hidden_dim_ + h] -= preactivation_gradient;
-                    for (std::size_t column = 0; column < input_dim_; ++column) {
-                        context_weights_[h * combined_dim + column] -=
-                            preactivation_gradient * features[column];
-                    }
-                    for (std::size_t column = 0; column < condition_dim_; ++column) {
-                        condition_weights_[h * condition_dim_ + column] -=
-                            preactivation_gradient * condition[column];
-                    }
-                }
-            }
+        };
+        scale(in_weights_);
+        scale(cond_weights_);
+        scale(slot_weights_);
+        scale(round_weights_);
+        scale(agg_weights_);
+        scale(hidden_bias_);
+        scale(out_high_weights_);
+        scale(out_high_bias_);
+        scale(out_low_weights_);
+        scale(out_low_bias_);
+        scale(slot_embedding_table_);
+        scale(round_embedding_table_);
+
+        float total_loss = 0.0F;
+        std::size_t total_slots = 0;
+        std::size_t correct_slots = 0;
+        for (std::size_t worker = 0; worker < worker_count; ++worker) {
+            total_loss += losses[worker];
+            total_slots += slot_counts[worker];
+            correct_slots += correct_counts[worker];
         }
         report.reconstruction_loss = total_loss /
             static_cast<float>(std::max<std::size_t>(1U, total_slots));
@@ -518,7 +833,7 @@ std::string HolisticDialogueModel::respond(
     const std::string& input, const math::Vector& osten_state, std::size_t action_id,
     float action_value, const math::Vector& goal, const std::string& memory_context,
     float* confidence) const {
-    if (!trained_ || vocabulary_.empty()) {
+    if (!trained_) {
         if (confidence != nullptr) {
             *confidence = 0.0F;
         }
@@ -526,69 +841,57 @@ std::string HolisticDialogueModel::respond(
     }
     const math::Vector condition = encode_condition(
         osten_state, action_id, action_value, goal, memory_context);
-    const std::size_t class_count = vocabulary_.size() + 1U;
+    const math::Vector features = encode_text(input);
+    std::vector<SlotLogits> logits;
+    math::Vector aggregate(agg_dim_, 0.0F);
+    for (std::size_t round = 0; round < rounds_; ++round) {
+        forward_pass(features, condition, aggregate, round, logits);
+        aggregate = aggregate_slots(logits);
+    }
+
     std::string candidate;
     float confidence_sum = 0.0F;
     std::size_t emitted = 0;
-    // Each pass refines the complete candidate in parallel. This is not
-    // left-to-right next-token generation.
-    math::Vector candidate_state(input_dim_, 0.0F);
-    for (std::size_t pass = 0; pass < 1U; ++pass) {
-        const math::Vector input_features = encode_text(input);
-        for (std::size_t index = 0; index < candidate_state.size(); ++index) {
-            candidate_state[index] = 0.75F * candidate_state[index] +
-                0.25F * input_features[index];
-        }
-        const math::Vector features = candidate_state;
-        std::string refined;
-        float pass_confidence = 0.0F;
-        std::size_t pass_emitted = 0;
-        for (std::size_t slot = 0; slot < max_response_codepoints_; ++slot) {
-            const math::Vector hidden = hidden_for(features, condition, slot);
-            std::size_t best = 0;
-            float best_score = -std::numeric_limits<float>::infinity();
-            float second_score = -std::numeric_limits<float>::infinity();
-            for (std::size_t current = 0; current < class_count; ++current) {
-                // A response needs a meaningful prefix before the end class
-                // can win. This prevents a high-frequency space from turning
-                // an otherwise trained model into an empty console line.
-                if (current == 0U && slot < 8U) {
-                    continue;
-                }
-                if (current != 0U && slot < 8U &&
-                    is_layout_codepoint(vocabulary_[current - 1U])) {
-                    continue;
-                }
-                float score = class_bias_[current];
-                if (current != 0U && !refined.empty() &&
-                    vocabulary_[current - 1U] ==
-                        static_cast<std::uint32_t>(static_cast<unsigned char>(refined.back()))) {
-                    score -= 0.35F;
-                }
-                for (std::size_t h = 0; h < hidden_dim_; ++h) {
-                    score += class_embeddings_[current * hidden_dim_ + h] * hidden[h];
-                }
-                if (score > best_score) {
-                    second_score = best_score;
-                    best_score = score;
-                    best = current;
-                } else if (score > second_score) {
-                    second_score = score;
-                }
+    for (std::size_t slot = 0; slot < max_response_codepoints_; ++slot) {
+        const math::Vector high_probabilities = softmax(logits[slot].high);
+        const math::Vector low_probabilities = softmax(logits[slot].low);
+        std::size_t best_high = 0;
+        std::size_t best_low = 0;
+        float best_score = -std::numeric_limits<float>::infinity();
+        float second_score = -std::numeric_limits<float>::infinity();
+        for (std::size_t c = 0; c < high_count_; ++c) {
+            const float score = high_probabilities[c];
+            if (score > best_score) {
+                second_score = best_score;
+                best_score = score;
+                best_high = c;
+            } else if (score > second_score) {
+                second_score = score;
             }
-            if (best == 0U || !append_codepoint(vocabulary_[best - 1U], refined)) {
-                break;
-            }
-            ++pass_emitted;
-            pass_confidence +=
-                1.0F / (1.0F + std::exp(-(best_score - second_score)));
         }
-        candidate = std::move(refined);
-        emitted = pass_emitted;
-        confidence_sum = pass_confidence;
-        if (candidate.empty()) {
+        for (std::size_t c = 0; c < low_count_; ++c) {
+            const float score = low_probabilities[c];
+            if (score > best_score) {
+                second_score = best_score;
+                best_score = score;
+                best_low = c;
+            } else if (score > second_score) {
+                second_score = score;
+            }
+        }
+        // The reserved codepoint 0 (high 0, low 0) ends the response. It must
+        // be selected on both factors to stop, so an accidental zero on one
+        // factor alone does not truncate the output.
+        const bool stop = best_high == 0U && best_low == 0U && slot >= 2U;
+        const std::uint32_t codepoint = charset::combine(
+            static_cast<std::uint32_t>(best_high),
+            static_cast<std::uint32_t>(best_low));
+        if (stop || !charset::is_valid_codepoint(codepoint) ||
+            !append_codepoint(codepoint, candidate)) {
             break;
         }
+        ++emitted;
+        confidence_sum += 1.0F / (1.0F + std::exp(-(best_score - second_score) * 8.0F));
     }
     while (!candidate.empty() &&
            std::isspace(static_cast<unsigned char>(candidate.front()))) {
@@ -598,31 +901,7 @@ std::string HolisticDialogueModel::respond(
            std::isspace(static_cast<unsigned char>(candidate.back()))) {
         candidate.pop_back();
     }
-    if (candidate.empty()) {
-        if (confidence != nullptr) {
-            *confidence = 0.0F;
-        }
-        return {};
-    }
-    if (!supervised_source_states_.empty()) {
-        const math::Vector query = encode_text(input);
-        std::size_t best = 0;
-        float best_score = -std::numeric_limits<float>::infinity();
-        for (std::size_t index = 0; index < supervised_source_states_.size(); ++index) {
-            const float score = math::cosine(query, supervised_source_states_[index]);
-            if (score > best_score) {
-                best_score = score;
-                best = index;
-            }
-        }
-        if (best_score >= 0.72F) {
-            if (confidence != nullptr) {
-                *confidence = std::clamp(best_score, 0.0F, 1.0F);
-            }
-            return supervised_targets_[best];
-        }
-    }
-    if (!decode_utf8(candidate).valid) {
+    if (candidate.empty() || !decode_utf8(candidate).valid) {
         if (confidence != nullptr) {
             *confidence = 0.0F;
         }
@@ -635,7 +914,8 @@ std::string HolisticDialogueModel::respond(
 }
 
 DialogueTrainingReport HolisticDialogueModel::train_pairs(
-    const std::vector<TextDocument>& dataset, std::size_t epochs) {
+    const std::vector<TextDocument>& dataset, std::size_t epochs,
+    const std::vector<math::Vector>& conditions) {
     if (dataset.empty()) {
         throw std::invalid_argument("text pair dataset must not be empty");
     }
@@ -645,14 +925,10 @@ DialogueTrainingReport HolisticDialogueModel::train_pairs(
             throw std::invalid_argument("text pair is empty or invalid UTF-8");
         }
     }
-    const DialogueTrainingReport report = train(dataset, epochs);
-    supervised_source_states_.clear();
-    supervised_targets_.clear();
-    for (const TextDocument& pair : dataset) {
-        supervised_source_states_.push_back(encode_text(pair.input));
-        supervised_targets_.push_back(pair.target);
-    }
-    return report;
+    // Conditional fine-tuning continues from the current parameters. No target
+    // text is stored for retrieval; the response is produced only by the
+    // learned iterative denoiser.
+    return train(dataset, epochs, conditions);
 }
 
 DialogueTrainingReport HolisticDialogueModel::evaluate_pairs(
@@ -713,26 +989,33 @@ void HolisticDialogueModel::save(std::ostream& output) const {
     write_size(output, max_response_codepoints_);
     write_size(output, condition_dim_);
     write_size(output, hidden_dim_);
+    write_size(output, slot_dim_);
+    write_size(output, round_dim_);
+    write_size(output, agg_dim_);
+    write_size(output, rounds_);
     output.write(reinterpret_cast<const char*>(&learning_rate_), sizeof(learning_rate_));
     const std::uint8_t trained = trained_ ? 1U : 0U;
     output.write(reinterpret_cast<const char*>(&trained), sizeof(trained));
-    write_size(output, vocabulary_.size());
-    for (const std::uint32_t value : vocabulary_) {
-        output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    write_size(output, high_count_);
+    write_size(output, low_count_);
+    if (trained_ == 0U) {
+        if (!output) {
+            throw std::runtime_error("failed to write dialogue checkpoint");
+        }
+        return;
     }
-    write_size(output, supervised_source_states_.size());
-    for (std::size_t index = 0; index < supervised_source_states_.size(); ++index) {
-        write_vector(output, supervised_source_states_[index]);
-        write_size(output, supervised_targets_[index].size());
-        output.write(supervised_targets_[index].data(),
-                     static_cast<std::streamsize>(supervised_targets_[index].size()));
-    }
-    write_vector(output, context_weights_);
-    write_vector(output, context_bias_);
-    write_vector(output, condition_weights_);
-    write_vector(output, slot_embeddings_);
-    write_vector(output, class_embeddings_);
-    write_vector(output, class_bias_);
+    write_vector(output, in_weights_);
+    write_vector(output, cond_weights_);
+    write_vector(output, slot_weights_);
+    write_vector(output, round_weights_);
+    write_vector(output, agg_weights_);
+    write_vector(output, hidden_bias_);
+    write_vector(output, out_high_weights_);
+    write_vector(output, out_high_bias_);
+    write_vector(output, out_low_weights_);
+    write_vector(output, out_low_bias_);
+    write_vector(output, slot_embedding_table_);
+    write_vector(output, round_embedding_table_);
     if (!output) {
         throw std::runtime_error("failed to write dialogue checkpoint");
     }
@@ -741,7 +1024,9 @@ void HolisticDialogueModel::save(std::ostream& output) const {
 void HolisticDialogueModel::load(std::istream& input) {
     if (read_size(input) != input_dim_ ||
         read_size(input) != max_response_codepoints_ ||
-        read_size(input) != condition_dim_ || read_size(input) != hidden_dim_) {
+        read_size(input) != condition_dim_ || read_size(input) != hidden_dim_ ||
+        read_size(input) != slot_dim_ || read_size(input) != round_dim_ ||
+        read_size(input) != agg_dim_ || read_size(input) != rounds_) {
         throw std::runtime_error("dialogue checkpoint configuration mismatch");
     }
     float stored_learning_rate = 0.0F;
@@ -751,56 +1036,29 @@ void HolisticDialogueModel::load(std::istream& input) {
     if (!input || !std::isfinite(stored_learning_rate) || trained > 1U) {
         throw std::runtime_error("invalid dialogue checkpoint header");
     }
-    const std::size_t vocabulary_size = read_size(input, kMaxVocabulary);
-    vocabulary_.assign(vocabulary_size, 0U);
-    for (std::uint32_t& value : vocabulary_) {
-        input.read(reinterpret_cast<char*>(&value), sizeof(value));
+    if (read_size(input) != high_count_ || read_size(input) != low_count_) {
+        throw std::runtime_error("dialogue checkpoint factor sizes do not match");
     }
-    const std::size_t supervised_count = read_size(input, 100000U);
-    supervised_source_states_.clear();
-    supervised_targets_.clear();
-    for (std::size_t index = 0; index < supervised_count; ++index) {
-        supervised_source_states_.push_back(read_vector(input, input_dim_));
-        const std::size_t target_size = read_size(input, 4U * 1024U * 1024U);
-        std::string target(target_size, '\0');
-        input.read(target.data(), static_cast<std::streamsize>(target_size));
-        if (!input || !valid_utf8(target)) {
-            throw std::runtime_error("invalid supervised dialogue checkpoint target");
-        }
-        supervised_targets_.push_back(std::move(target));
-    }
-    // An Astrax checkpoint may be created before dialogue training. In that
-    // state save() intentionally writes empty parameter vectors; do not try
-    // to read them as trained matrices.
     if (trained == 0U) {
-        if (vocabulary_size != 0U) {
-            throw std::runtime_error(
-                "untrained dialogue checkpoint contains a vocabulary");
-        }
-        context_weights_ = read_vector(input, 0U);
-        context_bias_ = read_vector(input, 0U);
-        condition_weights_ = read_vector(input, 0U);
-        slot_embeddings_ = read_vector(input, 0U);
-        class_embeddings_ = read_vector(input, 0U);
-        class_bias_ = read_vector(input, 0U);
-        if (!input) {
-            throw std::runtime_error("dialogue checkpoint is incomplete");
-        }
         trained_ = false;
         return;
     }
-    const std::size_t class_count = vocabulary_.size() + 1U;
-    const std::size_t combined_dim = input_dim_ + condition_dim_;
-    context_weights_ = read_vector(input, hidden_dim_ * combined_dim);
-    context_bias_ = read_vector(input, hidden_dim_);
-    condition_weights_ = read_vector(input, hidden_dim_ * condition_dim_);
-    slot_embeddings_ = read_vector(input, max_response_codepoints_ * hidden_dim_);
-    class_embeddings_ = read_vector(input, class_count * hidden_dim_);
-    class_bias_ = read_vector(input, class_count);
-    if (!input || !std::isfinite(stored_learning_rate)) {
+    in_weights_ = read_vector(input, hidden_dim_ * input_dim_);
+    cond_weights_ = read_vector(input, hidden_dim_ * condition_dim_);
+    slot_weights_ = read_vector(input, hidden_dim_ * slot_dim_);
+    round_weights_ = read_vector(input, hidden_dim_ * round_dim_);
+    agg_weights_ = read_vector(input, hidden_dim_ * agg_dim_);
+    hidden_bias_ = read_vector(input, hidden_dim_);
+    out_high_weights_ = read_vector(input, high_count_ * hidden_dim_);
+    out_high_bias_ = read_vector(input, high_count_);
+    out_low_weights_ = read_vector(input, low_count_ * hidden_dim_);
+    out_low_bias_ = read_vector(input, low_count_);
+    slot_embedding_table_ = read_vector(input, max_response_codepoints_ * slot_dim_);
+    round_embedding_table_ = read_vector(input, rounds_ * round_dim_);
+    if (!input) {
         throw std::runtime_error("dialogue checkpoint is incomplete");
     }
-    trained_ = trained != 0U;
+    trained_ = true;
 }
 
 void HolisticDialogueModel::validate_dataset(
@@ -883,3 +1141,4 @@ std::vector<TextDocument> HolisticDialogueModel::load_pairs(
 }
 
 } // namespace astrax
+

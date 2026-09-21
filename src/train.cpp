@@ -164,24 +164,48 @@ int main() {
         const auto loaded = astrax::OfflineRLTrainer::load_csv(
             dataset_path.string(), config.state_dim);
 
-        const std::filesystem::path corpus_path =
-            data_directory / "astrax_bilingual_corpus.txt";
+        // Real Wikipedia document corpora. Each file is one complete
+        // document per line, so it feeds the holistic whole-document objective
+        // directly. No prompt/response table is used for document training.
+        const std::filesystem::path corpus_zh_path =
+            data_directory / "wiki_zh.txt";
+        const std::filesystem::path corpus_en_path =
+            data_directory / "wiki_en.txt";
         const std::filesystem::path pairs_path =
             data_directory / "astrax_dialogue_pairs.tsv";
-        const std::vector<astrax::TextDocument> corpus =
-            astrax::HolisticDialogueModel::load_documents(
-                corpus_path.string(), 4U * 1024U * 1024U);
+        std::vector<astrax::TextDocument> corpus;
+        if (std::filesystem::exists(corpus_zh_path)) {
+            const std::vector<astrax::TextDocument> zh =
+                astrax::HolisticDialogueModel::load_documents(
+                    corpus_zh_path.string(), 4U * 1024U * 1024U);
+            corpus.insert(corpus.end(), zh.begin(), zh.end());
+        }
+        if (std::filesystem::exists(corpus_en_path)) {
+            const std::vector<astrax::TextDocument> en =
+                astrax::HolisticDialogueModel::load_documents(
+                    corpus_en_path.string(), 4U * 1024U * 1024U);
+            corpus.insert(corpus.end(), en.begin(), en.end());
+        }
+        if (corpus.empty()) {
+            throw std::runtime_error("no document corpus found under data/");
+        }
 
-        // Use a deterministic, evenly spaced subset for the compact local
-        // model. This covers the full corpus rather than training on only the
-        // first few documents, while keeping the native trainer bounded.
+        // Train on the complete corpus. The native trainer is data-parallel
+        // across CPU cores, so the whole Wikipedia corpus is used rather than
+        // a tiny subset. A small deterministic slice is held out for
+        // validation and never trained on.
+        const std::size_t validation_size =
+            std::max<std::size_t>(16U, corpus.size() / 50U);
         std::vector<astrax::TextDocument> text_training_corpus;
-        const std::size_t text_training_limit =
-            std::min<std::size_t>(corpus.size(), 1024U);
-        text_training_corpus.reserve(text_training_limit);
-        for (std::size_t index = 0; index < text_training_limit; ++index) {
-            text_training_corpus.push_back(
-                corpus[index * corpus.size() / text_training_limit]);
+        std::vector<astrax::TextDocument> validation_corpus;
+        text_training_corpus.reserve(corpus.size() - validation_size);
+        for (std::size_t index = 0; index < corpus.size(); ++index) {
+            if (index % 50U == 0U &&
+                validation_corpus.size() < validation_size) {
+                validation_corpus.push_back(corpus[index]);
+            } else {
+                text_training_corpus.push_back(corpus[index]);
+            }
         }
 
         astrax::AstraxModel model(config);
@@ -189,18 +213,22 @@ int main() {
         const std::vector<astrax::TextDocument> pairs =
             astrax::HolisticDialogueModel::load_pairs(
                 pairs_path.string(), 4U * 1024U * 1024U);
-        if (pairs.size() < 4U) {
-            throw std::runtime_error("dialogue pair corpus needs at least four examples");
-        }
         const std::size_t split = pairs.size() * 3U / 4U;
         const std::vector<astrax::TextDocument> training_pairs(
             pairs.begin(), pairs.begin() + static_cast<std::ptrdiff_t>(split));
         const std::vector<astrax::TextDocument> validation_pairs(
             pairs.begin() + static_cast<std::ptrdiff_t>(split), pairs.end());
+        // Stage A: masked-document reconstruction over the complete real
+        // Wikipedia corpus, with Osten-derived conditions. This is where the
+        // model learns how language is actually written.
+        const astrax::DialogueTrainingReport document_report =
+            model.train_dialogue(text_training_corpus, 4);
+        // Stage B: conditional fine-tuning on input/target pairs continues
+        // from the document-trained parameters.
         const astrax::DialogueTrainingReport text_report =
-            model.train_dialogue_pairs(training_pairs, 96);
+            model.train_dialogue_pairs(training_pairs, 48);
         const astrax::DialogueTrainingReport validation_report =
-            model.dialogue().evaluate_pairs(validation_pairs);
+            model.dialogue().evaluate_pairs(validation_corpus);
         const std::size_t code_examples = count_code_pairs(validation_pairs);
         const float code_compile_rate = evaluate_code_compile_rate(validation_pairs, root);
         // Evaluate a bounded representative set as well. The on-disk corpus
@@ -251,14 +279,19 @@ int main() {
                     << "predictor_loss=" << report.predictor_loss << '\n'
                     << "value_loss=" << report.value_loss << '\n'
                     << "average_intrinsic_reward=" << report.average_intrinsic_reward << '\n'
-                     << "text_corpus=" << corpus_path.string() << '\n'
+                     << "text_corpus_zh=" << corpus_zh_path.string() << '\n'
+                    << "text_corpus_en=" << corpus_en_path.string() << '\n'
                     << "dialogue_pairs=" << pairs_path.string() << '\n'
                     << "dialogue_pair_examples=" << pairs.size() << '\n'
                     << "dialogue_training_examples=" << training_pairs.size() << '\n'
                     << "dialogue_validation_examples=" << validation_pairs.size() << '\n'
-                    << "text_corpus_bytes=" << std::filesystem::file_size(corpus_path) << '\n'
+                    << "text_corpus_bytes=" << (std::filesystem::exists(corpus_zh_path) ? std::filesystem::file_size(corpus_zh_path) : 0) + (std::filesystem::exists(corpus_en_path) ? std::filesystem::file_size(corpus_en_path) : 0) << '\n'
                     << "text_documents=" << corpus.size() << '\n'
                     << "text_training_documents_unique=" << text_report.examples << '\n'
+                    << "document_stage_examples=" << document_report.examples << '\n'
+                    << "document_stage_epochs=" << document_report.epochs << '\n'
+                    << "document_stage_loss=" << document_report.reconstruction_loss << '\n'
+                    << "document_stage_codepoint_accuracy=" << document_report.codepoint_accuracy << '\n'
                     << "text_epochs=" << text_report.epochs << '\n'
                     << "text_reconstruction_loss=" << text_report.reconstruction_loss << '\n'
                     << "text_codepoint_accuracy=" << text_report.codepoint_accuracy << '\n'
@@ -280,11 +313,15 @@ int main() {
                   << "predictor_loss=" << report.predictor_loss << '\n'
                   << "value_loss=" << report.value_loss << '\n'
                   << "average_intrinsic_reward=" << report.average_intrinsic_reward << '\n'
-                  << "text_corpus_bytes=" << std::filesystem::file_size(corpus_path) << '\n'
+                  << "text_corpus_bytes=" << (std::filesystem::exists(corpus_zh_path) ? std::filesystem::file_size(corpus_zh_path) : 0) + (std::filesystem::exists(corpus_en_path) ? std::filesystem::file_size(corpus_en_path) : 0) << '\n'
                    << "text_documents=" << corpus.size() << '\n'
                    << "dialogue_training_examples=" << training_pairs.size() << '\n'
                    << "dialogue_validation_examples=" << validation_pairs.size() << '\n'
                    << "text_training_documents_unique=" << text_report.examples << '\n'
+                  << "document_stage_examples=" << document_report.examples << '\n'
+                  << "document_stage_epochs=" << document_report.epochs << '\n'
+                  << "document_stage_loss=" << document_report.reconstruction_loss << '\n'
+                  << "document_stage_codepoint_accuracy=" << document_report.codepoint_accuracy << '\n'
                   << "text_epochs=" << text_report.epochs << '\n'
                   << "text_reconstruction_loss=" << text_report.reconstruction_loss << '\n'
                   << "text_codepoint_accuracy=" << text_report.codepoint_accuracy << '\n'
