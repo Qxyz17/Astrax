@@ -126,6 +126,9 @@ public:
 
 private:
     math::Vector encode_text(const std::string& input) const;
+    // Replaces a deterministic fraction of codepoints with a mask sentinel.
+    std::string mask_document(const std::string& input,
+                              std::size_t document_index) const;
     math::Vector encode_condition(const math::Vector& osten_state,
                                   std::size_t action_id,
                                   float action_value,
@@ -162,7 +165,8 @@ private:
                      const math::Vector& aggregate,
                      std::size_t round,
                      const std::vector<std::uint32_t>& targets,
-                     const std::vector<char>& active);
+                     const std::vector<char>& active,
+                     math::Vector* feature_gradient = nullptr);
 
     // A complete copy of every learnable parameter. Used for data-parallel
     // training: each worker trains a private replica from the same snapshot,
@@ -180,6 +184,7 @@ private:
         math::Vector out_low_bias;
         math::Vector slot_embedding_table;
         math::Vector round_embedding_table;
+        math::Vector embeddings;
     };
 
     Replica capture() const;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -119,6 +120,17 @@ AstraxModel::AstraxModel(ModelConfig config)
       // are enough for a sentence or short code block while keeping training
       // affordable across the full Wikipedia corpus on a CPU.
       dialogue_(256, 64, std::max(config_.learning_rate, 0.08F), 128) {
+    // Attach the learned subword encoder if a BPE table is present. It is
+    // input-only; the output side still selects from the full Unicode space.
+    try {
+        const std::filesystem::path subwords =
+            std::filesystem::path("data") / "astrax_subwords.bin";
+        if (std::filesystem::exists(subwords)) {
+            load_subword_encoder(subwords.string());
+        }
+    } catch (const std::exception&) {
+        // A missing or malformed table falls back to codepoint encoding.
+    }
     if (config_.state_dim == 0 || config_.goal_dim == 0 ||
         config_.action_count == 0 || config_.memory_vector_dim == 0 ||
         config_.memory_capacity == 0 || !std::isfinite(config_.discount) ||

@@ -197,6 +197,30 @@ HolisticDialogueModel::HolisticDialogueModel(std::size_t input_dim,
     low_count_ = charset::kLowCount;
 }
 
+std::string HolisticDialogueModel::mask_document(
+    const std::string& input, std::size_t document_index) const {
+    const Decoded decoded = decode_utf8(input);
+    if (decoded.values.empty()) {
+        return input;
+    }
+    // A cheap deterministic per-document, per-position hash decides masking.
+    std::string result;
+    for (std::size_t index = 0; index < decoded.values.size(); ++index) {
+        std::uint64_t hash = mix_hash(
+            static_cast<std::uint64_t>(document_index) * 0x9e3779b97f4a7c15ULL +
+            static_cast<std::uint64_t>(index) * 0xbf58476d1ce4e5b9ULL + 0x2545f4914f6cdd1dULL);
+        const bool masked = (hash % 100U) < 20U; // mask ~20% of codepoints
+        if (masked) {
+            // U+2588 FULL BLOCK is the mask sentinel. It is rare in the corpus
+            // and valid UTF-8, so the encoder sees a clear gap.
+            append_codepoint(0x2588U, result);
+        } else if (!append_codepoint(decoded.values[index], result)) {
+            // Skip codepoints that cannot be encoded.
+        }
+    }
+    return result;
+}
+
 math::Vector HolisticDialogueModel::encode_text(const std::string& input) const {
     // Prefer the learned subword encoder when attached: it gives the input a
     // shared representation across synonyms, morphology, and mixed scripts.
@@ -428,7 +452,8 @@ math::Vector HolisticDialogueModel::aggregate_slots(
 float HolisticDialogueModel::train_pass(
     const math::Vector& features, const math::Vector& condition,
     const math::Vector& aggregate, std::size_t round,
-    const std::vector<std::uint32_t>& targets, const std::vector<char>& active) {
+    const std::vector<std::uint32_t>& targets, const std::vector<char>& active,
+    math::Vector* feature_gradient) {
     const std::size_t agg = std::min(aggregate.size(), agg_dim_);
     float total_loss = 0.0F;
     std::size_t active_count = 0;
@@ -544,6 +569,12 @@ float HolisticDialogueModel::train_pass(
             hidden_bias_[h] -= g;
             const std::size_t in_row = h * input_dim_;
             for (std::size_t column = 0; column < input_dim_; ++column) {
+                if (feature_gradient != nullptr &&
+                    column < feature_gradient->size()) {
+                    // d(loss)/d(features[column]) accumulates g * in_weight
+                    // before the weight is updated.
+                    (*feature_gradient)[column] += g * in_weights_[in_row + column];
+                }
                 in_weights_[in_row + column] -= g * features[column];
             }
             const std::size_t cond_row = h * condition_dim_;
@@ -586,6 +617,7 @@ HolisticDialogueModel::Replica HolisticDialogueModel::capture() const {
     replica.out_low_bias = out_low_bias_;
     replica.slot_embedding_table = slot_embedding_table_;
     replica.round_embedding_table = round_embedding_table_;
+    replica.embeddings = embeddings_.weights();
     return replica;
 }
 
@@ -602,6 +634,9 @@ void HolisticDialogueModel::install(const Replica& replica) {
     out_low_bias_ = replica.out_low_bias;
     slot_embedding_table_ = replica.slot_embedding_table;
     round_embedding_table_ = replica.round_embedding_table;
+    if (replica.embeddings.size() == embeddings_.weights().size()) {
+        embeddings_.weights() = replica.embeddings;
+    }
 }
 
 void HolisticDialogueModel::accumulate(const Replica& replica) {
@@ -622,6 +657,9 @@ void HolisticDialogueModel::accumulate(const Replica& replica) {
     add(out_low_bias_, replica.out_low_bias);
     add(slot_embedding_table_, replica.slot_embedding_table);
     add(round_embedding_table_, replica.round_embedding_table);
+    if (replica.embeddings.size() == embeddings_.weights().size()) {
+        add(embeddings_.weights(), replica.embeddings);
+    }
 }
 
 void HolisticDialogueModel::train_range(
@@ -644,7 +682,13 @@ void HolisticDialogueModel::train_range(
         if (target_values.values.empty()) {
             continue;
         }
-        const math::Vector features = encode_text(source_text);
+        // Masked-document reconstruction: a deterministic fraction of the
+        // source codepoints is replaced by a sentinel so the model must infer
+        // them from context instead of copying the input. The target stays the
+        // complete, unmasked document.
+        const std::string masked_source = mask_document(
+            source_text, document_index);
+        const math::Vector features = encode_text(masked_source);
         const math::Vector condition = conditions.empty()
             ? encode_condition({}, 0U, 0.0F, {}, {})
             : conditions[document_index];
@@ -656,10 +700,16 @@ void HolisticDialogueModel::train_range(
             targets[slot] = target_values.values[slot];
             active[slot] = 1;
         }
+        // The embeddings for this document's subword ids receive the feature
+        // gradient at the end of the pass, so the input encoder is trained too.
+        const std::vector<std::uint32_t> subword_ids =
+            has_encoder_ ? encoder_.encode_ids(masked_source)
+                         : std::vector<std::uint32_t>{};
+        math::Vector feature_gradient(features.size(), 0.0F);
         math::Vector aggregate(agg_dim_, 0.0F);
         for (std::size_t round = 0; round < rounds_; ++round) {
             loss += train_pass(features, condition, aggregate, round, targets,
-                               active);
+                               active, &feature_gradient);
             forward_pass(features, condition, aggregate, round, logits);
             for (std::size_t slot = 0; slot < length; ++slot) {
                 ++total_slots;
@@ -671,6 +721,27 @@ void HolisticDialogueModel::train_range(
                 }
             }
             aggregate = aggregate_slots(logits);
+        }
+        // Push the accumulated feature gradient back into the embedding rows
+        // used by this document. Pooling is a mean, so each used row receives
+        // the feature gradient divided by the number of used ids.
+        if (has_encoder_ && !subword_ids.empty()) {
+            const float inverse =
+                1.0F / static_cast<float>(subword_ids.size());
+            for (const std::uint32_t id : subword_ids) {
+                if (id >= embeddings_.capacity()) {
+                    continue;
+                }
+                math::Vector& weights = embeddings_.weights();
+                const std::size_t row =
+                    static_cast<std::size_t>(id) * embeddings_.dimension();
+                for (std::size_t index = 0; index < embeddings_.dimension() &&
+                                            index < feature_gradient.size();
+                     ++index) {
+                    weights[row + index] -=
+                        learning_rate_ * feature_gradient[index] * inverse;
+                }
+            }
         }
     }
 }
@@ -824,6 +895,7 @@ DialogueTrainingReport HolisticDialogueModel::train(
         scale(out_low_bias_);
         scale(slot_embedding_table_);
         scale(round_embedding_table_);
+        scale(embeddings_.weights());
 
         float total_loss = 0.0F;
         std::size_t total_slots = 0;
@@ -1039,6 +1111,7 @@ void HolisticDialogueModel::save(std::ostream& output) const {
     write_vector(output, out_low_bias_);
     write_vector(output, slot_embedding_table_);
     write_vector(output, round_embedding_table_);
+    write_vector(output, embeddings_.weights());
     if (!output) {
         throw std::runtime_error("failed to write dialogue checkpoint");
     }
@@ -1078,6 +1151,10 @@ void HolisticDialogueModel::load(std::istream& input) {
     out_low_bias_ = read_vector(input, low_count_);
     slot_embedding_table_ = read_vector(input, max_response_codepoints_ * slot_dim_);
     round_embedding_table_ = read_vector(input, rounds_ * round_dim_);
+    if (!embeddings_.weights().empty()) {
+        embeddings_.weights() =
+            read_vector(input, embeddings_.weights().size());
+    }
     if (!input) {
         throw std::runtime_error("dialogue checkpoint is incomplete");
     }
