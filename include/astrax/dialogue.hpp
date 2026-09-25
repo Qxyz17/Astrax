@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "astrax/embedding.hpp"
 #include "astrax/math.hpp"
 
 namespace astrax {
@@ -101,6 +102,18 @@ public:
         const std::string& path, std::size_t max_document_bytes);
     static std::vector<TextDocument> load_pairs(
         const std::string& path, std::size_t max_document_bytes);
+
+    // Attaches a learned input encoder. When set, encode_text() uses subword
+    // embeddings instead of codepoint hashing. The encoder is input-only; the
+    // output side still selects from the full Unicode codepoint space.
+    void set_input_encoder(SubwordEncoder encoder, EmbeddingTable table) {
+        encoder_ = std::move(encoder);
+        embeddings_ = std::move(table);
+        has_encoder_ = true;
+    }
+    bool has_input_encoder() const noexcept { return has_encoder_; }
+    const SubwordEncoder& input_encoder() const noexcept { return encoder_; }
+    const EmbeddingTable& input_embeddings() const noexcept { return embeddings_; }
 
     bool trained() const noexcept { return trained_; }
     std::size_t input_dim() const noexcept { return input_dim_; }
@@ -219,6 +232,10 @@ private:
     // Learned embeddings (not projected directly; used as one-hot sources).
     math::Vector slot_embedding_table_;  // max_response_codepoints_ * slot_dim_
     math::Vector round_embedding_table_; // rounds_ * round_dim_
+
+    SubwordEncoder encoder_;
+    EmbeddingTable embeddings_;
+    bool has_encoder_ = false;
 
     bool trained_ = false;
 };

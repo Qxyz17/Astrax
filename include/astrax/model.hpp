@@ -45,6 +45,12 @@ public:
                                                 std::size_t epochs);
     DialogueTrainingReport train_dialogue_pairs(
         const std::vector<TextDocument>& dataset, std::size_t epochs);
+    // Attaches a learned subword input encoder from a BPE binary file and an
+    // embedding table sized to the configured vocabulary. The output side of
+    // the model is unchanged: it still selects from the full Unicode space.
+    void load_subword_encoder(const std::string& path,
+                              std::size_t embedding_dim = 64,
+                              std::size_t vocabulary_capacity = 30000);
     std::string chat(const std::string& input);
     void save_checkpoint(const std::string& path) const;
     void load_checkpoint(const std::string& path);

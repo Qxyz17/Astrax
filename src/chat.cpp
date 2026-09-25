@@ -166,7 +166,9 @@ int wmain(int argc, wchar_t** argv) {
 #endif
     try {
         astrax::AstraxModel model;
-        model.load_checkpoint_bytes(astrax::embedded::kCheckpoint);
+        model.load_checkpoint_bytes(std::vector<std::uint8_t>(
+            astrax::embedded::kCheckpoint,
+            astrax::embedded::kCheckpoint + astrax::embedded::kCheckpointSize));
         model.set_goal(
             {"conversation", "Understand the complete message and answer it", 0.9F, true});
 

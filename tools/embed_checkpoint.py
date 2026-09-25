@@ -11,15 +11,19 @@ def main() -> int:
     data = source.read_bytes()
     lines = [
         "#pragma once",
+        "#include <cstddef>",
         "#include <cstdint>",
-        "#include <vector>",
         "namespace astrax::embedded {",
-        "inline const std::vector<std::uint8_t> kCheckpoint = {",
+        "// Stored as a plain array so it lives in the data segment. A",
+        "// std::vector initializer list this large would be built on the",
+        "// stack during static initialization and overflow it.",
+        "inline constexpr std::uint8_t kCheckpoint[] = {",
     ]
     for index in range(0, len(data), 16):
         lines.append("    " + ", ".join(f"0x{value:02X}" for value in data[index:index + 16]) + ",")
     lines.extend([
         "};",
+        f"inline constexpr std::size_t kCheckpointSize = sizeof(kCheckpoint);",
         "} // namespace astrax::embedded",
         "",
     ])

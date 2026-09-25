@@ -198,6 +198,23 @@ HolisticDialogueModel::HolisticDialogueModel(std::size_t input_dim,
 }
 
 math::Vector HolisticDialogueModel::encode_text(const std::string& input) const {
+    // Prefer the learned subword encoder when attached: it gives the input a
+    // shared representation across synonyms, morphology, and mixed scripts.
+    if (has_encoder_ && !encoder_.empty() && input_dim_ > 0) {
+        const std::vector<std::uint32_t> ids = encoder_.encode_ids(input);
+        math::Vector pooled = embeddings_.encode(ids);
+        math::Vector projected(input_dim_, 0.0F);
+        for (std::size_t index = 0; index < pooled.size(); ++index) {
+            projected[index % projected.size()] += pooled[index];
+        }
+        const float length = math::norm(projected);
+        if (length > 1.0F) {
+            for (float& value : projected) {
+                value /= length;
+            }
+        }
+        return projected;
+    }
     math::Vector result(input_dim_, 0.0F);
     math::Vector reverse_state(input_dim_, 0.0F);
     const Decoded decoded = decode_utf8(input);
@@ -855,33 +872,37 @@ std::string HolisticDialogueModel::respond(
     for (std::size_t slot = 0; slot < max_response_codepoints_; ++slot) {
         const math::Vector high_probabilities = softmax(logits[slot].high);
         const math::Vector low_probabilities = softmax(logits[slot].low);
+        // The high and low factors are selected independently. Tracking a
+        // single shared score would let the larger high distribution suppress
+        // every low candidate, which collapsed the low factor to class zero.
         std::size_t best_high = 0;
         std::size_t best_low = 0;
-        float best_score = -std::numeric_limits<float>::infinity();
-        float second_score = -std::numeric_limits<float>::infinity();
+        float best_high_score = -std::numeric_limits<float>::infinity();
+        float second_high_score = -std::numeric_limits<float>::infinity();
         for (std::size_t c = 0; c < high_count_; ++c) {
             const float score = high_probabilities[c];
-            if (score > best_score) {
-                second_score = best_score;
-                best_score = score;
+            if (score > best_high_score) {
+                second_high_score = best_high_score;
+                best_high_score = score;
                 best_high = c;
-            } else if (score > second_score) {
-                second_score = score;
+            } else if (score > second_high_score) {
+                second_high_score = score;
             }
         }
+        float best_low_score = -std::numeric_limits<float>::infinity();
+        float second_low_score = -std::numeric_limits<float>::infinity();
         for (std::size_t c = 0; c < low_count_; ++c) {
             const float score = low_probabilities[c];
-            if (score > best_score) {
-                second_score = best_score;
-                best_score = score;
+            if (score > best_low_score) {
+                second_low_score = best_low_score;
+                best_low_score = score;
                 best_low = c;
-            } else if (score > second_score) {
-                second_score = score;
+            } else if (score > second_low_score) {
+                second_low_score = score;
             }
         }
-        // The reserved codepoint 0 (high 0, low 0) ends the response. It must
-        // be selected on both factors to stop, so an accidental zero on one
-        // factor alone does not truncate the output.
+        // The reserved codepoint 0 (high 0, low 0) ends the response only when
+        // both factors independently choose it.
         const bool stop = best_high == 0U && best_low == 0U && slot >= 2U;
         const std::uint32_t codepoint = charset::combine(
             static_cast<std::uint32_t>(best_high),
@@ -891,7 +912,9 @@ std::string HolisticDialogueModel::respond(
             break;
         }
         ++emitted;
-        confidence_sum += 1.0F / (1.0F + std::exp(-(best_score - second_score) * 8.0F));
+        const float margin = (best_high_score - second_high_score) +
+                             (best_low_score - second_low_score);
+        confidence_sum += 1.0F / (1.0F + std::exp(-margin * 4.0F));
     }
     while (!candidate.empty() &&
            std::isspace(static_cast<unsigned char>(candidate.front()))) {

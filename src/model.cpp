@@ -14,6 +14,7 @@
 #include <unordered_set>
 
 #include "astrax/architecture.hpp"
+#include "astrax/embedding.hpp"
 #include "astrax/math.hpp"
 
 namespace astrax {
@@ -127,6 +128,14 @@ AstraxModel::AstraxModel(ModelConfig config)
         !std::isfinite(config_.value_guidance_weight)) {
         throw std::invalid_argument("invalid Astrax model configuration");
     }
+}
+
+void AstraxModel::load_subword_encoder(const std::string& path,
+                                       std::size_t embedding_dim,
+                                       std::size_t vocabulary_capacity) {
+    SubwordEncoder encoder = SubwordEncoder::load(path);
+    EmbeddingTable table(embedding_dim, vocabulary_capacity);
+    dialogue_.set_input_encoder(std::move(encoder), std::move(table));
 }
 
 void AstraxModel::set_goal(Goal goal) {

@@ -37,9 +37,10 @@ struct ModelConfig {
     // Keeping both weights configurable avoids baking a policy into the engine.
     float policy_guidance_weight = 0.25F;
     float value_guidance_weight = 1.0F;
-    // Keep training bounded when a corpus is materialized by repetition to a
-    // target byte size. Unique documents are always retained first.
-    std::size_t dialogue_training_document_limit = 512;
+    // Upper bound on documents used for one dialogue training call. The
+    // Wikipedia corpora hold several thousand unique documents, so this is
+    // raised above the corpus size to train on all of them.
+    std::size_t dialogue_training_document_limit = 16384;
     std::uint64_t seed = 23;
 };
 
