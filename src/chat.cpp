@@ -1,4 +1,5 @@
 ﻿#include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -14,7 +15,6 @@
 
 #include "astrax/model.hpp"
 #include "embedded_dialogue_pairs.hpp"
-#include "embedded_model.hpp"
 
 namespace {
 
@@ -166,9 +166,32 @@ int wmain(int argc, wchar_t** argv) {
 #endif
     try {
         astrax::AstraxModel model;
-        model.load_checkpoint_bytes(std::vector<std::uint8_t>(
-            astrax::embedded::kCheckpoint,
-            astrax::embedded::kCheckpoint + astrax::embedded::kCheckpointSize));
+        // The trained checkpoint is loaded from disk. It is far too large to
+        // embed as a source array (the compiler exhausts its heap), so the
+        // executable searches the usual locations relative to itself and the
+        // working directory.
+        {
+            const std::vector<std::string> candidates = {
+                "artifacts/astrax_training.astrax-model",
+                "../artifacts/astrax_training.astrax-model",
+                "../../artifacts/astrax_training.astrax-model",
+            };
+            bool loaded = false;
+            for (const std::string& candidate : candidates) {
+                std::ifstream probe(candidate, std::ios::binary);
+                if (!probe) {
+                    continue;
+                }
+                probe.close();
+                model.load_checkpoint(candidate);
+                loaded = true;
+                break;
+            }
+            if (!loaded) {
+                throw std::runtime_error(
+                    "no trained checkpoint found; run astrax_train.exe first");
+            }
+        }
         model.set_goal(
             {"conversation", "Understand the complete message and answer it", 0.9F, true});
 

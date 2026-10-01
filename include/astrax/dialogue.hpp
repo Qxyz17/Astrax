@@ -135,16 +135,15 @@ private:
                                   const math::Vector& goal,
                                   const std::string& memory_context) const;
 
-    // Factorized per-slot logits: a high-part distribution and a low-part
-    // distribution. Their combination yields a full Unicode codepoint.
+    // Per-slot byte logits: one dense distribution over 256 byte values plus
+    // the reserved stop class.
     struct SlotLogits {
-        math::Vector high; // high_count_
-        math::Vector low;  // low_count_
+        math::Vector bytes; // charset::kClassCount
     };
 
     // One refinement pass. Reads the aggregate of the previous pass's slot
-    // distributions and returns the new per-slot factorized logits. Slot and
-    // round embeddings select per-position and per-pass parameters.
+    // distributions and returns the new per-slot byte logits. Slot and round
+    // embeddings select per-position and per-pass parameters.
     void forward_pass(const math::Vector& features,
                       const math::Vector& condition,
                       const math::Vector& aggregate,
@@ -158,13 +157,13 @@ private:
     // Computes softmax probabilities for a vector of logits.
     static math::Vector softmax(const math::Vector& logits);
 
-    // Trains a single refinement pass against per-slot target codepoints using
-    // manual backpropagation. Returns the mean loss over active slots.
+    // Trains a single refinement pass against per-slot target byte classes
+    // using manual backpropagation. Returns the mean loss over active slots.
     float train_pass(const math::Vector& features,
                      const math::Vector& condition,
                      const math::Vector& aggregate,
                      std::size_t round,
-                     const std::vector<std::uint32_t>& targets,
+                     const std::vector<std::size_t>& targets,
                      const std::vector<char>& active,
                      math::Vector* feature_gradient = nullptr);
 
@@ -178,10 +177,8 @@ private:
         math::Vector round_weights;
         math::Vector agg_weights;
         math::Vector hidden_bias;
-        math::Vector out_high_weights;
-        math::Vector out_high_bias;
-        math::Vector out_low_weights;
-        math::Vector out_low_bias;
+        math::Vector out_weights;
+        math::Vector out_bias;
         math::Vector slot_embedding_table;
         math::Vector round_embedding_table;
         math::Vector embeddings;
@@ -211,11 +208,8 @@ private:
     // multiplies training cost, so keep it small.
     std::size_t rounds_ = 3;
 
-    // The complete Unicode codepoint space is factorized into a high part and
-    // a low part. There is no data-derived vocabulary and no truncation: any
-    // UTF-8 codepoint can be selected. See astrax/charset.hpp.
-    std::size_t high_count_ = 0;
-    std::size_t low_count_ = 0;
+    // Output classes: 256 byte values plus a stop sentinel. See charset.hpp.
+    std::size_t class_count_ = 0;
 
     // input -> hidden
     math::Vector in_weights_;   // hidden_dim_ * input_dim_
@@ -228,11 +222,9 @@ private:
     // aggregate -> hidden
     math::Vector agg_weights_;  // hidden_dim_ * agg_dim_
     math::Vector hidden_bias_;  // hidden_dim_
-    // hidden -> factorized codepoint classes
-    math::Vector out_high_weights_;  // high_count_ * hidden_dim_
-    math::Vector out_high_bias_;     // high_count_
-    math::Vector out_low_weights_;   // low_count_ * hidden_dim_
-    math::Vector out_low_bias_;      // low_count_
+    // hidden -> byte classes
+    math::Vector out_weights_;  // class_count_ * hidden_dim_
+    math::Vector out_bias_;     // class_count_
 
     // Learned embeddings (not projected directly; used as one-hot sources).
     math::Vector slot_embedding_table_;  // max_response_codepoints_ * slot_dim_
