@@ -139,8 +139,27 @@ CorpusEvaluation evaluate_corpus(const astrax::HolisticDialogueModel& model,
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        // Long-running training is driven from the command line so the same
+        // binary works for a quick local check and for a multi-day CPU run.
+        std::size_t document_epochs = 4;
+        std::size_t pair_epochs = 48;
+        bool resume = false;
+        std::string checkpoint_override;
+        for (int index = 1; index < argc; ++index) {
+            const std::string argument = argv[index];
+            if (argument == "--resume") {
+                resume = true;
+            } else if (argument == "--document-epochs" && index + 1 < argc) {
+                document_epochs = static_cast<std::size_t>(std::stoull(argv[++index]));
+            } else if (argument == "--pair-epochs" && index + 1 < argc) {
+                pair_epochs = static_cast<std::size_t>(std::stoull(argv[++index]));
+            } else if (argument == "--checkpoint" && index + 1 < argc) {
+                checkpoint_override = argv[++index];
+            }
+        }
+
         astrax::ModelConfig config;
         config.state_dim = 32;
         config.action_count = 8;
@@ -208,7 +227,17 @@ int main() {
             }
         }
 
+        const std::filesystem::path checkpoint_path =
+            checkpoint_override.empty()
+                ? artifact_directory / "astrax_training.astrax-model"
+                : std::filesystem::path(checkpoint_override);
+
         astrax::AstraxModel model(config);
+        // Resume continues from an existing checkpoint so a long run can be
+        // stopped and restarted without losing progress.
+        if (resume && std::filesystem::exists(checkpoint_path)) {
+            model.load_checkpoint(checkpoint_path.string());
+        }
         const astrax::TrainingReport report = model.train_offline(loaded, epochs);
         const std::vector<astrax::TextDocument> pairs =
             astrax::HolisticDialogueModel::load_pairs(
@@ -222,11 +251,11 @@ int main() {
         // Wikipedia corpus, with Osten-derived conditions. This is where the
         // model learns how language is actually written.
         const astrax::DialogueTrainingReport document_report =
-            model.train_dialogue(text_training_corpus, 4);
+            model.train_dialogue(text_training_corpus, document_epochs);
         // Stage B: conditional fine-tuning on input/target pairs continues
         // from the document-trained parameters.
         const astrax::DialogueTrainingReport text_report =
-            model.train_dialogue_pairs(training_pairs, 48);
+            model.train_dialogue_pairs(training_pairs, pair_epochs);
         const astrax::DialogueTrainingReport validation_report =
             model.dialogue().evaluate_pairs(validation_corpus);
         const std::size_t code_examples = count_code_pairs(validation_pairs);
@@ -244,8 +273,6 @@ int main() {
         const CorpusEvaluation corpus_report =
             evaluate_corpus(model.dialogue(), evaluation_corpus);
 
-        const std::filesystem::path checkpoint_path =
-            artifact_directory / "astrax_training.astrax-model";
         const astrax::math::Vector validation_state = loaded.front().state;
         const std::size_t validation_action = loaded.front().action;
         const astrax::math::Vector expected_prediction =

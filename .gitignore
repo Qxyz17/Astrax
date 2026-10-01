@@ -13,6 +13,10 @@ build/
 artifacts/
 *.astrax-model
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Downloaded Wikipedia corpora (reproducible via tools/wiki/extract_wiki_corpus.py)
 data/wiki_zh.txt
 data/wiki_en.txt
