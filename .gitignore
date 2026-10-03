@@ -13,6 +13,11 @@ build/
 artifacts/
 *.astrax-model
 
+# Large model files and cloned inference engine
+data/*.gguf
+tools/llama.cpp/
+build/llama-cpu/
+
 # Python bytecode
 __pycache__/
 *.pyc
