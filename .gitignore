@@ -18,6 +18,10 @@ data/*.gguf
 tools/llama.cpp/
 build/llama-cpu/
 
+# Web frontend
+web/node_modules/
+web/dist/
+
 # Python bytecode
 __pycache__/
 *.pyc
