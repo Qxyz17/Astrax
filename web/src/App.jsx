@@ -1,4 +1,17 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+// The assistant introduces itself as Astrax. The backend is a local model; the
+// identity is set here so the whole product reads as one system.
+const SYSTEM_PROMPT = {
+  role: "system",
+  content:
+    "You are Astrax, a helpful assistant running locally on the user's machine. " +
+    "Answer clearly and concisely. Use Markdown for structure, lists, and code. " +
+    "If a question is unclear, ask for clarification instead of guessing. " +
+    "When the user writes in Chinese, answer in Chinese.",
+};
 
 // Talks to the local llama-server through the Vite proxy. Streaming is done
 // with the OpenAI-compatible /v1/chat/completions endpoint.
@@ -6,7 +19,13 @@ async function streamChat(messages, onDelta, signal) {
   const response = await fetch("/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, stream: true, max_tokens: 512 }),
+    body: JSON.stringify({
+      messages: [SYSTEM_PROMPT, ...messages],
+      stream: true,
+      max_tokens: 1024,
+      temperature: 0.7,
+      repeat_penalty: 1.1,
+    }),
     signal,
   });
   if (!response.ok || !response.body) {
@@ -43,10 +62,18 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const abortRef = useRef(null);
   const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  function autoGrow() {
+    const element = textareaRef.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = Math.min(element.scrollHeight, 160) + "px";
+  }
 
   async function send() {
     const text = input.trim();
@@ -54,6 +81,7 @@ export default function App() {
     const history = [...messages, { role: "user", content: text }];
     setMessages([...history, { role: "assistant", content: "" }]);
     setInput("");
+    requestAnimationFrame(autoGrow);
     setBusy(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -61,10 +89,8 @@ export default function App() {
       await streamChat(history, (delta) => {
         setMessages((current) => {
           const next = current.slice();
-          next[next.length - 1] = {
-            role: "assistant",
-            content: next[next.length - 1].content + delta,
-          };
+          const last = next.length - 1;
+          next[last] = { role: "assistant", content: next[last].content + delta };
           return next;
         });
       }, controller.signal);
@@ -74,7 +100,7 @@ export default function App() {
           const next = current.slice();
           next[next.length - 1] = {
             role: "assistant",
-            content: "Error: " + error.message,
+            content: "**Error:** " + error.message,
           };
           return next;
         });
@@ -92,6 +118,7 @@ export default function App() {
   function reset() {
     stop();
     setMessages([]);
+    setInput("");
   }
 
   function onKeyDown(event) {
@@ -121,7 +148,19 @@ export default function App() {
         )}
         {messages.map((message, index) => (
           <div key={index} className={"row " + message.role}>
-            <div className={"bubble " + message.role}>{message.content || "…"}</div>
+            {message.role === "assistant" ? (
+              <div className="bubble assistant markdown">
+                {message.content ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {message.content}
+                  </ReactMarkdown>
+                ) : (
+                  <span className="typing">…</span>
+                )}
+              </div>
+            ) : (
+              <div className="bubble user">{message.content}</div>
+            )}
           </div>
         ))}
         <div ref={bottomRef} />
@@ -129,8 +168,9 @@ export default function App() {
 
       <footer className="composer">
         <textarea
+          ref={textareaRef}
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => { setInput(event.target.value); autoGrow(); }}
           onKeyDown={onKeyDown}
           placeholder="Message Astrax…"
           rows={1}
