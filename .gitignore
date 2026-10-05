@@ -13,10 +13,13 @@ build/
 artifacts/
 *.astrax-model
 
-# Large model files and cloned inference engine
+# Large model files and cloned inference engine (kept outside the project)
 data/*.gguf
+data/finetune_chatml.txt
 tools/llama.cpp/
 build/llama-cpu/
+build/engine/
+tools/lfm/
 
 # Web frontend
 web/node_modules/

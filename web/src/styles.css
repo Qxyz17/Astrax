@@ -5,6 +5,31 @@
   --text: #e6e8ee;
   --muted: #8b93a7;
   --accent: #6ea8fe;
+  --scroll: #2b3140;
+  --scroll-hover: #3a4254;
+}
+
+/* Consistent dark scrollbars for every scroll container. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-hover);
+  background-clip: content-box;
 }
 
 * { box-sizing: border-box; }

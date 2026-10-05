@@ -6,15 +6,58 @@ import remarkGfm from "remark-gfm";
 // identity is set here so the whole product reads as one system.
 const SYSTEM_PROMPT = {
   role: "system",
-  content:
-    "You are Astrax, a helpful assistant running locally on the user's machine. " +
-    "Answer clearly and concisely. Use Markdown for structure, lists, and code. " +
-    "If a question is unclear, ask for clarification instead of guessing. " +
-    "When the user writes in Chinese, answer in Chinese.",
+  content: [
+    "You are Astrax, a local assistant.",
+    "",
+    "Identity:",
+    "- Your name is Astrax. If asked who you are, say you are Astrax.",
+    "- You run locally on the user's own machine. You are not a cloud service.",
+    "",
+    "Capabilities you may state:",
+    "- Hold a multi-turn conversation and remember earlier messages in the chat.",
+    "- Answer questions, explain concepts, summarize, translate, and write code.",
+    "- Read a web page when the user provides a URL: the page text is fetched",
+    "  and given to you as context, so answer from that text.",
+    "- Reply in the user's language (Chinese or English).",
+    "",
+    "Rules:",
+    "- When web page content is provided in the conversation, treat it as the",
+    "  source of truth for questions about that page. Never invent facts about a",
+    "  page you were not given. If asked what something is built with, only claim",
+    "  it after seeing it in the provided text; otherwise say you do not know.",
+    "- If a question is unclear, ask for clarification instead of guessing.",
+    "- Be concise. Use Markdown for lists, code blocks, and tables.",
+    "- Do not claim abilities you do not have (no internet browsing on your own,",
+    "  no tool access beyond what is provided in the conversation).",
+  ].join("\n"),
 };
 
 // Talks to the local llama-server through the Vite proxy. Streaming is done
 // with the OpenAI-compatible /v1/chat/completions endpoint.
+// Finds http(s) URLs in a message.
+function extractUrls(text) {
+  const matches = text.match(/https?:\/\/[^\s]+/gi) || [];
+  return [...new Set(matches)];
+}
+
+// Fetches each URL through the dev-server endpoint and returns a context block.
+async function fetchContext(urls) {
+  const parts = [];
+  for (const url of urls) {
+    try {
+      const response = await fetch("/api/fetch-url?url=" + encodeURIComponent(url));
+      if (!response.ok) continue;
+      const data = await response.json();
+      if (data.text) {
+        parts.push("Content of " + url + ":\n" + data.text);
+      }
+    } catch {
+      // ignore individual fetch failures
+    }
+  }
+  return parts.join("\n\n");
+}
+
 async function streamChat(messages, onDelta, signal) {
   const response = await fetch("/v1/chat/completions", {
     method: "POST",
@@ -86,6 +129,21 @@ export default function App() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      // If the message contains links, read them first and hand the page text
+      // to the model as context so it does not have to guess.
+      const urls = extractUrls(text);
+      if (urls.length > 0) {
+        const context = await fetchContext(urls);
+        if (context) {
+          history.splice(history.length - 1, 0, {
+            role: "system",
+            content:
+              "The user referenced the following web page content. Treat it as " +
+              "the source of truth and do not invent details about it:\n\n" +
+              context,
+          });
+        }
+      }
       await streamChat(history, (delta) => {
         setMessages((current) => {
           const next = current.slice();
