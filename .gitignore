@@ -13,13 +13,13 @@ build/
 artifacts/
 *.astrax-model
 
-# Large model files and cloned inference engine (kept outside the project)
+# Third-party model files and inference engines live outside this repository
+# (see start_astrax.bat). Keep them out of git if present locally.
 data/*.gguf
-data/finetune_chatml.txt
+*.gguf
 tools/llama.cpp/
 build/llama-cpu/
 build/engine/
-tools/lfm/
 
 # Web frontend
 web/node_modules/
